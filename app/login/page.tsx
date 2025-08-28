@@ -1,9 +1,10 @@
+// app/login/page.tsx
 "use client";
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 
 const ADMIN_USERNAME = "admin";
-const ADMIN_PASSWORD = "123456"; // เปลี่ยนรหัสผ่านนี้ในโปรดักชัน
+const ADMIN_PASSWORD = "123456"; // โปรดเปลี่ยนในโปรดักชัน
 
 const LoginPage: React.FC = () => {
   const [username, setUsername] = useState("");
@@ -11,15 +12,23 @@ const LoginPage: React.FC = () => {
   const [error, setError] = useState("");
   const router = useRouter();
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-      // เก็บสถานะล็อกอินใน localStorage
-      localStorage.setItem("isAdmin", "true");
-      router.push("/");
+      const res = await fetch("/api/login", { method: "POST" });
+      if (res.ok) {
+        router.push("/home");
+      } else {
+        setError("ไม่สามารถเข้าสู่ระบบได้");
+      }
     } else {
       setError("ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง");
     }
+  };
+
+  const handleLineLogin = () => {
+    // พาไปหน้า LIFF เพื่อทำ LINE Login แล้วกลับมาที่ /home
+    router.push("/liff?next=/home");
   };
 
   return (
@@ -30,7 +39,7 @@ const LoginPage: React.FC = () => {
         alignItems: "center",
         justifyContent: "center",
         background: "linear-gradient(135deg, #ffb6d5 0%, #ffd6ec 100%)",
-        fontFamily: "'Inter', 'Segoe UI', Arial, sans-serif"
+        fontFamily: "'Inter', 'Segoe UI', Arial, sans-serif",
       }}
     >
       <div
@@ -44,7 +53,7 @@ const LoginPage: React.FC = () => {
           width: "100%",
           display: "flex",
           flexDirection: "column",
-          alignItems: "center"
+          alignItems: "center",
         }}
       >
         <div
@@ -57,14 +66,18 @@ const LoginPage: React.FC = () => {
             alignItems: "center",
             justifyContent: "center",
             marginBottom: 18,
-            boxShadow: "0 2px 8px rgba(255,182,213,0.10)"
+            boxShadow: "0 2px 8px rgba(255,182,213,0.10)",
           }}
         >
           <svg width="36" height="36" fill="none" viewBox="0 0 24 24">
-            <rect width="24" height="24" rx="12" fill="#fff" opacity="0.15"/>
-            <path d="M12 13.5c2.485 0 7.5 1.243 7.5 3.75V19H4.5v-1.75c0-2.507 5.015-3.75 7.5-3.75Zm0-1.5a3.75 3.75 0 1 1 0-7.5 3.75 3.75 0 0 1 0 7.5Z" fill="#ff69b4"/>
+            <rect width="24" height="24" rx="12" fill="#fff" opacity="0.15" />
+            <path
+              d="M12 13.5c2.485 0 7.5 1.243 7.5 3.75V19H4.5v-1.75c0-2.507 5.015-3.75 7.5-3.75Zm0-1.5a3.75 3.75 0 1 1 0-7.5 3.75 3.75 0 0 1 0 7.5Z"
+              fill="#ff69b4"
+            />
           </svg>
         </div>
+
         <h2
           style={{
             fontSize: 28,
@@ -72,101 +85,114 @@ const LoginPage: React.FC = () => {
             marginBottom: 10,
             textAlign: "center",
             color: "#c2185b",
-            letterSpacing: "-1px"
+            letterSpacing: "-1px",
           }}
         >
           เข้าสู่ระบบแอดมิน
         </h2>
         <p style={{ color: "#b85c8a", marginBottom: 28, fontSize: 15, textAlign: "center" }}>
-          โปรดกรอกข้อมูลเพื่อเข้าสู่ระบบ
+          โปรดกรอกข้อมูลเพื่อเข้าสู่ระบบ หรือเข้าสู่ระบบด้วย LINE
         </p>
+
+        {/* ฟอร์มแอดมิน */}
         <form
           onSubmit={handleLogin}
           style={{
             width: "100%",
             display: "flex",
             flexDirection: "column",
-            gap: 18
+            gap: 18,
           }}
         >
           <div>
-            <label style={{ fontWeight: 600, color: "#ff69b4", fontSize: 15 }}>
-              ชื่อผู้ใช้
-            </label>
-            <div style={{
-              display: "flex",
-              alignItems: "center",
-              background: "#fff0f6",
-              borderRadius: 8,
-              border: "1px solid #ffd6ec",
-              marginTop: 6,
-              padding: "0 10px"
-            }}>
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" style={{opacity:0.6}}>
-                <path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-3.33 0-10 1.67-10 5v3h20v-3c0-3.33-6.67-5-10-5Z" fill="#ff69b4"/>
+            <label style={{ fontWeight: 600, color: "#ff69b4", fontSize: 15 }}>ชื่อผู้ใช้</label>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                background: "#fff0f6",
+                borderRadius: 8,
+                border: "1px solid #ffd6ec",
+                marginTop: 6,
+                padding: "0 10px",
+              }}
+            >
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" style={{ opacity: 0.6 }}>
+                <path
+                  d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-3.33 0-10 1.67-10 5v3h20v-3c0-3.33-6.67-5-10-5Z"
+                  fill="#ff69b4"
+                />
               </svg>
               <input
                 type="text"
                 value={username}
-                onChange={e => setUsername(e.target.value)}
+                onChange={(e) => setUsername(e.target.value)}
                 style={{
                   width: "100%",
                   padding: "10px 8px",
                   border: "none",
                   outline: "none",
                   background: "transparent",
-                  fontSize: 16
+                  fontSize: 16,
                 }}
                 autoFocus
                 placeholder="admin"
               />
             </div>
           </div>
+
           <div>
-            <label style={{ fontWeight: 600, color: "#ff69b4", fontSize: 15 }}>
-              รหัสผ่าน
-            </label>
-            <div style={{
-              display: "flex",
-              alignItems: "center",
-              background: "#fff0f6",
-              borderRadius: 8,
-              border: "1px solid #ffd6ec",
-              marginTop: 6,
-              padding: "0 10px"
-            }}>
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" style={{opacity:0.6}}>
-                <path d="M17 9V7a5 5 0 0 0-10 0v2a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2Zm-8-2a3 3 0 1 1 6 0v2H9V7Zm8 11H7v-7h10v7Zm-5-3a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" fill="#ff69b4"/>
+            <label style={{ fontWeight: 600, color: "#ff69b4", fontSize: 15 }}>รหัสผ่าน</label>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                background: "#fff0f6",
+                borderRadius: 8,
+                border: "1px solid #ffd6ec",
+                marginTop: 6,
+                padding: "0 10px",
+              }}
+            >
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" style={{ opacity: 0.6 }}>
+                <path
+                  d="M17 9V7a5 5 0 0 0-10 0v2a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2Zm-8-2a3 3 0 1 1 6 0v2H9V7Zm8 11H7v-7h10v7Zm-5-3a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
+                  fill="#ff69b4"
+                />
               </svg>
               <input
                 type="password"
                 value={password}
-                onChange={e => setPassword(e.target.value)}
+                onChange={(e) => setPassword(e.target.value)}
                 style={{
                   width: "100%",
                   padding: "10px 8px",
                   border: "none",
                   outline: "none",
                   background: "transparent",
-                  fontSize: 16
+                  fontSize: 16,
                 }}
                 placeholder="รหัสผ่าน"
               />
             </div>
           </div>
+
           {error && (
-            <div style={{
-              color: "#e63946",
-              background: "#ffeaea",
-              borderRadius: 6,
-              padding: "8px 0",
-              textAlign: "center",
-              fontWeight: 500,
-              fontSize: 15
-            }}>
+            <div
+              style={{
+                color: "#e63946",
+                background: "#ffeaea",
+                borderRadius: 6,
+                padding: "8px 0",
+                textAlign: "center",
+                fontWeight: 500,
+                fontSize: 15,
+              }}
+            >
               {error}
             </div>
           )}
+
           <button
             type="submit"
             style={{
@@ -180,12 +206,65 @@ const LoginPage: React.FC = () => {
               fontSize: 18,
               cursor: "pointer",
               boxShadow: "0 2px 8px rgba(255,182,213,0.10)",
-              transition: "background 0.2s"
+              transition: "background 0.2s",
             }}
           >
-            เข้าสู่ระบบ
+            เข้าสู่ระบบ (แอดมิน)
           </button>
         </form>
+
+        {/* เส้นคั่น + หรือ */}
+        <div style={{ width: "100%", display: "grid", placeItems: "center", margin: "16px 0" }}>
+          <div style={{ width: "100%", height: 1, background: "#fde2ef" }} />
+          <span
+            style={{
+              background: "rgba(255,255,255,0.96)",
+              padding: "2px 10px",
+              marginTop: -12,
+              color: "#b85c8a",
+              fontWeight: 700,
+              borderRadius: 999,
+              border: "1px solid #fde2ef",
+              fontSize: 12,
+            }}
+          >
+            หรือ
+          </span>
+        </div>
+
+        {/* ปุ่ม LINE Login */}
+        <button
+          type="button"
+          onClick={handleLineLogin}
+          style={{
+            width: "100%",
+            padding: "12px 0",
+            background: "#06C755",
+            color: "#fff",
+            border: "none",
+            borderRadius: 8,
+            fontWeight: 800,
+            fontSize: 16,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+          }}
+        >
+          {/* LINE bubble icon */}
+          <svg width="20" height="20" viewBox="0 0 36 36" aria-hidden>
+            <path
+              fill="#fff"
+              d="M18 6C10.82 6 5 10.83 5 16.79c0 4.19 2.93 7.87 7.2 9.46l-.6 3.88a1 1 0 0 0 1.53.99l4.72-2.94c.7.07 1.4.1 2.12.1 7.18 0 13-4.83 13-10.79S25.18 6 18 6z"
+            />
+            <path
+              fill="#06C755"
+              d="M18 8c6.07 0 11 3.86 11 8.79S24.07 25.58 18 25.58c-.67 0-1.33-.04-1.98-.11a1.5 1.5 0 0 0-.9.23l-3.23 2.02.35-2.29a1.5 1.5 0 0 0-.98-1.65C7.63 22.13 6 19.62 6 16.79 6 11.86 11.93 8 18 8Z"
+            />
+          </svg>
+          เข้าสู่ระบบด้วย LINE
+        </button>
       </div>
     </div>
   );

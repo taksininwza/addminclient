@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@line/liff": "^2.27.1",
     "dayjs": "^1.11.13",
     "firebase": "^12.0.0",
     "next": "15.4.5",
