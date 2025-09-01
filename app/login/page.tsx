@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 
-const ADMIN_USERNAME = "admin";
+const ADMIN_USERNAME = "admin2";
 const ADMIN_PASSWORD = "123456"; // โปรดเปลี่ยนในโปรดักชัน
 
 const LoginPage: React.FC = () => {
@@ -91,7 +91,7 @@ const LoginPage: React.FC = () => {
           เข้าสู่ระบบแอดมิน
         </h2>
         <p style={{ color: "#b85c8a", marginBottom: 28, fontSize: 15, textAlign: "center" }}>
-          โปรดกรอกข้อมูลเพื่อเข้าสู่ระบบ หรือเข้าสู่ระบบด้วย LINE
+          โปรดกรอกข้อมูลเพื่อเข้าสู่ระบบ 
         </p>
 
         {/* ฟอร์มแอดมิน */}
@@ -136,7 +136,7 @@ const LoginPage: React.FC = () => {
                   fontSize: 16,
                 }}
                 autoFocus
-                placeholder="admin"
+                placeholder="username"
               />
             </div>
           </div>
@@ -172,7 +172,7 @@ const LoginPage: React.FC = () => {
                   background: "transparent",
                   fontSize: 16,
                 }}
-                placeholder="รหัสผ่าน"
+                placeholder="password"
               />
             </div>
           </div>
@@ -209,62 +209,11 @@ const LoginPage: React.FC = () => {
               transition: "background 0.2s",
             }}
           >
-            เข้าสู่ระบบ (แอดมิน)
+            เข้าสู่ระบบ
           </button>
         </form>
 
-        {/* เส้นคั่น + หรือ */}
-        <div style={{ width: "100%", display: "grid", placeItems: "center", margin: "16px 0" }}>
-          <div style={{ width: "100%", height: 1, background: "#fde2ef" }} />
-          <span
-            style={{
-              background: "rgba(255,255,255,0.96)",
-              padding: "2px 10px",
-              marginTop: -12,
-              color: "#b85c8a",
-              fontWeight: 700,
-              borderRadius: 999,
-              border: "1px solid #fde2ef",
-              fontSize: 12,
-            }}
-          >
-            หรือ
-          </span>
-        </div>
-
-        {/* ปุ่ม LINE Login */}
-        <button
-          type="button"
-          onClick={handleLineLogin}
-          style={{
-            width: "100%",
-            padding: "12px 0",
-            background: "#06C755",
-            color: "#fff",
-            border: "none",
-            borderRadius: 8,
-            fontWeight: 800,
-            fontSize: 16,
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-          }}
-        >
-          {/* LINE bubble icon */}
-          <svg width="20" height="20" viewBox="0 0 36 36" aria-hidden>
-            <path
-              fill="#fff"
-              d="M18 6C10.82 6 5 10.83 5 16.79c0 4.19 2.93 7.87 7.2 9.46l-.6 3.88a1 1 0 0 0 1.53.99l4.72-2.94c.7.07 1.4.1 2.12.1 7.18 0 13-4.83 13-10.79S25.18 6 18 6z"
-            />
-            <path
-              fill="#06C755"
-              d="M18 8c6.07 0 11 3.86 11 8.79S24.07 25.58 18 25.58c-.67 0-1.33-.04-1.98-.11a1.5 1.5 0 0 0-.9.23l-3.23 2.02.35-2.29a1.5 1.5 0 0 0-.98-1.65C7.63 22.13 6 19.62 6 16.79 6 11.86 11.93 8 18 8Z"
-            />
-          </svg>
-          เข้าสู่ระบบด้วย LINE
-        </button>
+       
       </div>
     </div>
   );

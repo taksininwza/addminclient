@@ -1,12 +1,13 @@
 // app/booking/page.tsx
-"use client";
+'use client';
 
 import React, { useEffect, useMemo, useState } from "react";
 import dayjs from "dayjs";
 import Link from "next/link";
 import Image from "next/image";
-// ปรับ path ถ้า lib อยู่ตำแหน่งอื่น
-import { database, ref, onValue, push, set } from "../../lib/firebase";
+import { useRouter } from "next/navigation";
+import { database, ref, onValue } from "../../lib/firebase";
+import { computeUniqueAmount } from '../../lib/uniqueAmount';
 
 type Barber = { name: string };
 type Reservation = {
@@ -20,7 +21,18 @@ type Reservation = {
   created_at?: string;
 };
 
-// ===== Navbar styles (เหมือนหน้า nail-home) =====
+type Payment = {
+  date?: string;
+  time?: string;
+  barber?: string;
+  barber_id?: string;
+  status?: string;
+  matched?: boolean;
+};
+
+const DEPOSIT_THB = Number(process.env.NEXT_PUBLIC_DEPOSIT_AMOUNT || 100);
+
+// ===== Navbar styles =====
 const LOGO_SIZE = 80;
 const navBtn: React.CSSProperties = {
   padding: "8px 14px",
@@ -50,22 +62,37 @@ const card: React.CSSProperties = {
 };
 
 const services = [
-  { id: "manicure", title: "ทำเล็บมือ (ตัดแต่ง + ทาสี)" },
-  { id: "pedicure", title: "ทำเล็บเท้า" },
+  { id: "manicure",  title: "ทำเล็บมือ (ตัดแต่ง + ทาสี)" },
+  { id: "pedicure",  title: "ทำเล็บเท้า" },
   { id: "extension", title: "ต่อเล็บเจล/อะคริลิค" },
-  { id: "paint", title: "เพ้นท์ลาย" },
-  { id: "removal", title: "ถอด/ล้างเจล" },
-  { id: "spa", title: "สปามือ/สปาเท้า" },
+  { id: "paint",     title: "เพ้นท์ลาย" },
+  { id: "removal",   title: "ถอด/ล้างเจล" },
+  { id: "spa",       title: "สปามือ/สปาเท้า" },
 ];
 
 // ===== ตั้งค่าเวลาร้าน =====
-const OPEN_HOUR = 10;       // เปิด 10:00
-const CLOSE_HOUR = 20;      // ปิด 20:00 (สล็อตสุดท้ายเริ่ม 19:00)
-const SLOT_MIN = 60;        // ⏱️ ช่องละ "1 ชั่วโมง"
-const LUNCH_START = 12;     // ข้าม 12:00
-const LUNCH_END = 13;       // ถึง 12:59
+const OPEN_HOUR  = 10;
+const CLOSE_HOUR = 20;
+const SLOT_MIN   = 60;
+const LUNCH_START = 12;
+const LUNCH_END   = 13;
+
+// ====== Helpers (รองรับเลขไทย/อารบิก) ======
+const THAI_DIGITS = '๐๑๒๓๔๕๖๗๘๙';
+function toArabicDigits(s: string) {
+  return s.replace(/[๐-๙]/g, (c) => String(THAI_DIGITS.indexOf(c)));
+}
+function stripNonDigits(s: string) {
+  return toArabicDigits(s).replace(/\D/g, '');
+}
+function stripDigitsFromName(s: string) {
+  // ลบทั้งเลขอารบิกและเลขไทย
+  return s.replace(/[0-9๐-๙]/g, '');
+}
 
 export default function BookingPage() {
+  const router = useRouter();
+
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
   const [serviceId, setServiceId] = useState<string>(services[0].id);
@@ -73,31 +100,39 @@ export default function BookingPage() {
   const [note, setNote] = useState("");
   const [selectedBarberId, setSelectedBarberId] = useState<string>("");
 
+  // ⭐ ระยะเวลา (ชั่วโมง) — เลือกได้หลายชั่วโมง
+  const [durationHours, setDurationHours] = useState<number>(1);
+
   const [barbers, setBarbers] = useState<Record<string, Barber>>({});
   const [reservations, setReservations] = useState<Record<string, Reservation>>({});
+  const [payments, setPayments] = useState<Record<string, Payment>>({});
 
-  const [submitting, setSubmitting] = useState(false);
-  const [resultMsg, setResultMsg] = useState<string | null>(null);
+  const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // โหลดรายชื่อช่าง + การจอง + การชำระ
   useEffect(() => {
-    const unsub1 = onValue(ref(database, "barbers"), (s) => {
+    const unsubBarbers = onValue(ref(database, "barbers"), (s) => {
       const b = s.val() || {};
       setBarbers(b);
       if (!selectedBarberId && Object.keys(b).length > 0) {
         setSelectedBarberId(Object.keys(b)[0]);
       }
     });
-    const unsub2 = onValue(ref(database, "reservations"), (s) => {
+    const unsubRes = onValue(ref(database, "reservations"), (s) => {
       setReservations(s.val() || {});
     });
+    const unsubPays = onValue(ref(database, "payments"), (s) => {
+      setPayments(s.val() || {});
+    });
     return () => {
-      unsub1();
-      unsub2();
+      unsubBarbers();
+      unsubRes();
+      unsubPays();
     };
   }, [selectedBarberId]);
 
-  // สร้างช่วงเวลาของวันที่เลือก: 10:00–20:00 (ทีละ 60 นาที) และ "ข้าม" 12:00–13:00
+  // สร้างช่วงเวลา 10–20 (เว้นพักเที่ยง) และตัดเวลาที่ผ่านมาใน "วันนี้"
   const timeSlots = useMemo(() => {
     const base = dayjs(dateStr);
     const slots: string[] = [];
@@ -106,88 +141,163 @@ export default function BookingPage() {
 
     while (t.isBefore(end)) {
       const h = t.hour();
-      // ข้ามช่วงพักกลางวัน 12:00–12:59
-      if (h < LUNCH_START || h >= LUNCH_END) {
-        slots.push(t.format("HH:mm"));
-      }
+      if (h < LUNCH_START || h >= LUNCH_END) slots.push(t.format("HH:mm"));
       t = t.add(SLOT_MIN, "minute");
     }
 
-    // ถ้าวันที่เลือกเป็น "วันนี้" ให้ตัดเวลาที่ผ่านมาแล้วออก
     if (base.isSame(dayjs(), "day")) {
       return slots.filter((hhmm) => dayjs(`${dateStr} ${hhmm}`).isAfter(dayjs()));
     }
     return slots;
   }, [dateStr]);
 
-  // เวลาที่ถูกจองแล้ว (ยึดตาม barber เดียวกัน)
+  // ชื่อช่าง
+  const barberName = useMemo(
+    () => (selectedBarberId ? barbers[selectedBarberId]?.name : undefined),
+    [selectedBarberId, barbers]
+  );
+
+  // ช่องเวลาที่ถูกจองแล้ว (จาก LINE + จากการชำระยืนยันแล้ว)
   const reservedTimes = useMemo(() => {
-    const list = Object.values(reservations);
-    return new Set(
-      list
-        .filter(
-          (r) =>
-            r.appointment_date === dateStr &&
-            (selectedBarberId ? r.barber_id === selectedBarberId : true)
-        )
-        .map((r) => r.appointment_time)
-    );
-  }, [reservations, dateStr, selectedBarberId]);
+    const set = new Set<string>();
 
-  const availableTimes = timeSlots.filter((t) => !reservedTimes.has(t));
+    // จาก reservations/*
+    Object.values(reservations || {}).forEach((r) => {
+      if (!r) return;
+      const sameDate = r.appointment_date === dateStr;
+      const sameBarber = selectedBarberId ? r.barber_id === selectedBarberId : true;
+      if (sameDate && sameBarber && r.appointment_time) {
+        set.add(r.appointment_time);
+      }
+    });
 
+    // จาก payments/* (เฉพาะที่ยืนยันแล้ว)
+    Object.values(payments || {}).forEach((p) => {
+      if (!p) return;
+      const isConfirmed = p.status === 'confirmed' || p.matched === true;
+      if (!isConfirmed) return;
+
+      const sameDate = p.date === dateStr;
+      const sameBarber =
+        selectedBarberId
+          ? (p.barber_id && p.barber_id === selectedBarberId) ||
+            (!!barberName && !!p.barber && p.barber.toUpperCase() === barberName.toUpperCase())
+          : true;
+
+      if (sameDate && sameBarber && p.time) {
+        set.add(p.time);
+      }
+    });
+
+    return set;
+  }, [reservations, payments, dateStr, selectedBarberId, barberName]);
+
+  // ⭐ คำนวณ "เวลาเริ่มต้น" ที่จองได้ โดยต้องมี slot ว่างติดกันตามจำนวนชั่วโมงที่เลือก
+  const availableStartTimes = useMemo(() => {
+    // ต้องมีอย่างน้อย 1 ชม.
+    const h = Math.max(1, durationHours);
+
+    return timeSlots.filter((start, idx) => {
+      for (let k = 0; k < h; k++) {
+        const slot = timeSlots[idx + k];
+        if (!slot) return false;
+        const expected = dayjs(`${dateStr} ${start}`).add(k * SLOT_MIN, "minute").format("HH:mm");
+        if (slot !== expected) return false;            // ต้องต่อกันจริง ๆ ทีละ 60 นาที
+        if (reservedTimes.has(slot)) return false;      // ห้ามชนกับที่ถูกจอง
+      }
+      return true;
+    });
+  }, [timeSlots, durationHours, reservedTimes, dateStr]);
+
+  // สำหรับแสดงช่วงเวลา start–end
+  const renderRange = (start: string) => {
+    const end = dayjs(`${dateStr} ${start}`).add(durationHours * SLOT_MIN, "minute").format("HH:mm");
+    return `${start}–${end}`;
+  };
+
+  // ====== Key filters ======
+  const onNameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // บล็อกตัวเลข (ทั้ง 0-9 และ ๐-๙)
+    if (/[0-9๐-๙]/.test(e.key)) e.preventDefault();
+  };
+  const onPhoneKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // อนุญาตปุ่มควบคุมพื้นฐาน
+    const ok = ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'];
+    if (ok.includes(e.key)) return;
+    // อนุญาตเฉพาะตัวเลข 0-9 (เลขไทยจะถูกแปลงใน onChange)
+    if (!/^[0-9]$/.test(e.key)) e.preventDefault();
+  };
+
+  // กดจอง
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setResultMsg(null);
 
-    if (!customerName.trim()) return setError("กรุณากรอกชื่อ");
+    const nameClean = customerName.trim();
+    const phoneClean = stripNonDigits(phone);
+
+    if (!nameClean) return setError("กรุณากรอกชื่อ");
+    if (/[0-9๐-๙]/.test(nameClean)) return setError("ชื่อห้ามมีตัวเลข");
+
     if (!dateStr) return setError("กรุณาเลือกวันที่");
-    const chosenRadio = (document.querySelector('input[name="time"]:checked') as HTMLInputElement | null)?.value;
-    if (!chosenRadio) return setError("กรุณาเลือกเวลา");
+    const chosenStart = (document.querySelector('input[name="timeStart"]:checked') as HTMLInputElement | null)?.value;
+    if (!chosenStart) return setError("กรุณาเลือกเวลาเริ่มต้น");
     if (!selectedBarberId) return setError("กรุณาเลือกช่าง");
 
-    try {
-      setSubmitting(true);
-      const clash = Object.values(reservations).some(
-        (r) =>
-          r.appointment_date === dateStr &&
-          r.appointment_time === chosenRadio &&
-          r.barber_id === selectedBarberId
-      );
-      if (clash) {
-        setError("ช่วงเวลานี้มีการจองแล้ว กรุณาเลือกเวลาอื่น");
-        setSubmitting(false);
-        return;
-      }
+    // สร้างรายการเวลาทั้งช่วงตามชั่วโมงที่เลือก
+    const selectedTimes: string[] = Array.from({ length: durationHours }, (_, k) =>
+      dayjs(`${dateStr} ${chosenStart}`).add(k * SLOT_MIN, "minute").format("HH:mm")
+    );
 
-      const chosenService = services.find((s) => s.id === serviceId)?.title || "";
-      const newRef = push(ref(database, "reservations"));
-      const payload: Reservation = {
-        appointment_date: dateStr,
-        appointment_time: chosenRadio,
-        barber_id: selectedBarberId,
-        customer_name: customerName.trim(),
-        phone: phone.trim(),
-        note: note.trim(),
-        service_title: chosenService,
-        created_at: new Date().toISOString(),
-      };
-      await set(newRef, payload);
+    // กันชนซ้ำจาก reservations
+    const clashFromReservations = Object.values(reservations).some(
+      (r) =>
+        r.appointment_date === dateStr &&
+        r.barber_id === selectedBarberId &&
+        selectedTimes.includes(r.appointment_time)
+    );
 
-      setResultMsg(
-        `✅ จองคิวสำเร็จ!\nชื่อ: ${payload.customer_name}\nบริการ: ${chosenService}\nช่าง: ${barbers[selectedBarberId]?.name || "-"}\nวันที่ ${payload.appointment_date} เวลา ${payload.appointment_time}\nรหัสจอง: ${newRef.key}`
-      );
-      (document.querySelector('input[name="time"]:checked') as HTMLInputElement | null)?.blur();
-      const radio = document.querySelector('input[name="time"]:checked') as HTMLInputElement | null;
-      if (radio) radio.checked = false;
-      setNote("");
-    } catch (err) {
-      console.error(err);
-      setError("บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
-    } finally {
-      setSubmitting(false);
+    // กันชนซ้ำจาก payments (ที่ยืนยันแล้ว)
+    const barberNm = barbers[selectedBarberId]?.name || '';
+    const clashFromPayments = Object.values(payments).some((p) => {
+      const isConfirmed = p?.status === 'confirmed' || p?.matched === true;
+      if (!isConfirmed) return false;
+      const sameDate = p?.date === dateStr;
+      const sameBarber =
+        p?.barber_id
+          ? p.barber_id === selectedBarberId
+          : (p?.barber && barberNm && p.barber.toUpperCase() === barberNm.toUpperCase());
+      return !!(sameDate && sameBarber && p?.time && selectedTimes.includes(p.time));
+    });
+
+    if (clashFromReservations || clashFromPayments) {
+      return setError("ช่วงเวลานี้ถูกปิดการจองแล้ว กรุณาเลือกเวลาอื่น");
     }
+
+    // ---------- redirect ไปหน้า OCR ----------
+    setRedirecting(true);
+
+    const refCode = "NAIL-" + Math.random().toString(36).slice(2, 8).toUpperCase();
+    const chosenService = services.find((s) => s.id === serviceId)?.title || "";
+    const barberNameSel = barbers[selectedBarberId]?.name || "";
+
+    // ใช้เศษสตางค์ไม่ซ้ำ เดิมตามระบบ
+    const base   = DEPOSIT_THB * 1;
+    const unique = computeUniqueAmount(base, refCode);
+
+    const params = new URLSearchParams({
+      expected: unique.toFixed(2),
+      ref: refCode,
+      name: nameClean,
+      service: chosenService,
+      date: dateStr,
+      time: chosenStart,
+      hours: String(durationHours),
+      barber: barberNameSel,
+      minutes: '15'
+    });
+
+    router.push(`/payment/ocr?${params.toString()}`);
   };
 
   return (
@@ -200,7 +310,7 @@ export default function BookingPage() {
         color: "#0f172a",
       }}
     >
-      {/* ===== Navbar (เหมือนหน้า nail-home) ===== */}
+      {/* ===== Navbar ===== */}
       <header
         style={{
           position: "sticky",
@@ -270,45 +380,59 @@ export default function BookingPage() {
             </div>
           </div>
 
-          {/* วันที่ */}
-          {/* วันที่ */}
-<div style={{ marginBottom: 12 }}>
-  <label style={{ fontWeight: 800, color: "#c2185b" }}>วันที่</label>
-  <div style={{ marginTop: 6 }}>
-    <input
-      type="date"
-      min={dayjs().format("YYYY-MM-DD")}
-      value={dateStr}
-      onChange={(e) => setDateStr(e.target.value)}
-      style={{
-        width: "100%",       // รีสปอนซีฟสำหรับจอเล็ก
-        maxWidth: 320,       // ❗️จำกัดความกว้างสูงสุด (ปรับเป็น 280–360 ได้)
-        height: 44,
-        padding: "10px 12px",
-        fontSize: 16,
-        borderRadius: 10,
-        border: "1px solid #ffd6ec",
-        background: "#fff",
-        display: "block",
-      }}
-    />
-  </div>
-</div>
+          {/* วันที่ + ระยะเวลา */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontWeight: 800, color: "#c2185b" }}>วันที่</label>
+              <div style={{ marginTop: 6 }}>
+                <input
+                  type="date"
+                  min={dayjs().format("YYYY-MM-DD")}
+                  value={dateStr}
+                  onChange={(e) => setDateStr(e.target.value)}
+                  style={{
+                    width: "100%",
+                    height: 44,
+                    padding: "10px 12px",
+                    fontSize: 16,
+                    borderRadius: 10,
+                    border: "1px solid #ffd6ec",
+                    background: "#fff",
+                    display: "block",
+                  }}
+                />
+              </div>
+            </div>
 
+            <div>
+              <label style={{ fontWeight: 800, color: "#c2185b" }}>ระยะเวลา (ชั่วโมง)</label>
+              <select
+                value={durationHours}
+                onChange={(e) => setDurationHours(Math.max(1, Number(e.target.value)))}
+                style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 10, border: "1px solid #ffd6ec", background: "#fff" }}
+              >
+                {[1,2,3,4,5,6,7,8].map(h => (
+                  <option key={h} value={h}>{h} ชั่วโมง</option>
+                ))}
+              </select>
+            </div>
+          </div>
 
-          {/* เวลา */}
+          {/* เวลาเริ่ม (ต้องมีช่วงต่อกันครบตามชั่วโมงที่เลือก) */}
           <div style={{ marginBottom: 12 }}>
-            <label style={{ fontWeight: 800, color: "#c2185b", display: "block", marginBottom: 6 }}>เวลา (ว่าง)</label>
-            {availableTimes.length === 0 ? (
+            <label style={{ fontWeight: 800, color: "#c2185b", display: "block", marginBottom: 6 }}>
+              เวลา (เริ่มต้น) — จอง {durationHours} ชั่วโมง
+            </label>
+            {availableStartTimes.length === 0 ? (
               <div style={{ border: "1px dashed #ffd6ec", borderRadius: 10, padding: 14, color: "#64748b" }}>
-                ไม่มีเวลาว่างในวันที่เลือก
+                ไม่มีเวลาว่างตามระยะเวลาที่เลือก
               </div>
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
-                {availableTimes.map((t) => (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 }}>
+                {availableStartTimes.map((t) => (
                   <label key={t} style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #ffd6ec", padding: "10px 12px", borderRadius: 10, cursor: "pointer", background: "#fff" }}>
-                    <input type="radio" name="time" value={t} />
-                    <span style={{ fontWeight: 700 }}>{t}</span>
+                    <input type="radio" name="timeStart" value={t} />
+                    <span style={{ fontWeight: 700 }}>{renderRange(t)}</span>
                   </label>
                 ))}
               </div>
@@ -318,20 +442,29 @@ export default function BookingPage() {
           {/* ข้อมูลลูกค้า */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
             <div>
-              <label style={{ fontWeight: 800, color: "#c2185b" }}>ชื่อ</label>
+              <label style={{ fontWeight: 800, color: "#c2185b" }}>ชื่อ </label>
               <input
                 value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
+                onChange={(e) => setCustomerName(stripDigitsFromName(e.target.value))}
+                onKeyDown={onNameKeyDown}
+                onBlur={(e) => setCustomerName(stripDigitsFromName(e.target.value.trim()))}
                 placeholder="ชื่อของคุณ"
+                // ช่วย browser validation (กันเลขอารบิก)
+                pattern="[^0-9]+"
                 style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 10, border: "1px solid #ffd6ec", background: "#fff" }}
               />
             </div>
             <div>
               <label style={{ fontWeight: 800, color: "#c2185b" }}>เบอร์โทร </label>
-              <input    
+              <input
+                type="tel"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="08x-xxx-xxxx"
+                onKeyDown={onPhoneKeyDown}
+                onChange={(e) => setPhone(stripNonDigits(e.target.value))}
+                onBlur={(e) => setPhone(stripNonDigits(e.target.value))}
+                placeholder="08xxxxxxxx"
                 style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 10, border: "1px solid #ffd6ec", background: "#fff" }}
               />
             </div>
@@ -354,16 +487,10 @@ export default function BookingPage() {
             </div>
           )}
 
-          {resultMsg && (
-            <div style={{ color: "#c2185b", background: "#fff0f7", border: "1px solid #ffd6ec", borderRadius: 8, padding: "10px 12px", marginBottom: 10, whiteSpace: "pre-wrap", fontWeight: 700 }}>
-              {resultMsg}
-            </div>
-          )}
-
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <button
               type="submit"
-              disabled={submitting || availableTimes.length === 0}
+              disabled={redirecting || availableStartTimes.length === 0}
               style={{
                 padding: "12px 18px",
                 borderRadius: 12,
@@ -373,15 +500,46 @@ export default function BookingPage() {
                 fontWeight: 900,
                 cursor: "pointer",
                 minWidth: 160,
-                opacity: submitting ? 0.7 : 1,
+                opacity: redirecting ? 0.7 : 1,
                 boxShadow: "0 8px 20px rgba(176,124,255,.25)",
               }}
             >
-              {submitting ? "กำลังบันทึก..." : "จองคิว"}
+              {redirecting ? "กำลังไปหน้าอัปโหลดสลิป..." : "จองคิว"}
             </button>
           </div>
         </form>
       </section>
+
+      {/* Loading Overlay */}
+      {redirecting && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(255,255,255,.8)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 50,
+            backdropFilter: "blur(3px)",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+            <div
+              style={{
+                width: 54,
+                height: 54,
+                borderRadius: "50%",
+                border: "6px solid #fce1f0",
+                borderTopColor: "#c2185b",
+                animation: "spin 1s linear infinite",
+              }}
+            />
+            <div style={{ fontWeight: 800, color: "#c2185b" }}>กำลังไปหน้าอัปโหลดสลิป…</div>
+          </div>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
     </div>
   );
 }

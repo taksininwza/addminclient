@@ -1,17 +1,77 @@
 // app/nail-home/page.tsx
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
+import dayjs from "dayjs";
+import { createPortal } from "react-dom";
 import { database, ref, onValue, push, set } from "../lib/firebase";
 
-// ===== CONFIG =====
+/* ================== CONFIG & STYLES ================== */
 const LOGO_SIZE = 80;
 
+// LINE ID ของคุณ (หรือใช้ ENV)
+const LINE_ADD_FRIEND_URL =
+  process.env.NEXT_PUBLIC_LINE_ADD_FRIEND_URL ??
+  "https://line.me/R/ti/p/@978tofxe";
+
+const navBtn: React.CSSProperties = {
+  padding: "8px 14px",
+  borderRadius: 10,
+  border: "1px solid #e2e8f0",
+  color: "#0f172a",
+  fontWeight: 700,
+  textDecoration: "none",
+  background: "#fff",
+};
+
+// ปุ่มหลักสำหรับ "จองคิว"
+const primaryBtn: React.CSSProperties = {
+  padding: "16px 22px",
+  fontSize: 32,
+  lineHeight: 1.1,
+  borderRadius: 14,
+  border: "1px solid transparent",
+  background: "linear-gradient(135deg,#ff7ac8,#b07cff)",
+  color: "#fff",
+  fontWeight: 900,
+  textDecoration: "none",
+  boxShadow: "0 8px 20px rgba(176,124,255,.25)",
+  display: "inline-block",
+  transition: "transform .15s ease, box-shadow .15s ease, filter .15s ease",
+};
+
+const badge: React.CSSProperties = {
+  background: "#ffe4f3",
+  border: "1px solid #ffd6ec",
+  color: "#c2185b",
+  padding: "6px 10px",
+  borderRadius: 999,
+  fontSize: 12,
+  fontWeight: 800,
+};
+const cardstyle: React.CSSProperties = {
+  background: "#fff",
+  borderRadius: 16,
+  border: "1px solid #eef2f7",
+  boxShadow: "0 6px 24px rgba(2,6,23,.05)",
+};
+
+/* ================== TYPES ================== */
 type Review = { name: string; text: string; createdAt: number };
 
-// รูปบริการ (เหมือนเดิม)
+type Promo = {
+  title: string;
+  subtitle?: string;
+  discountPercent?: number;
+  startDate?: string; // YYYY-MM-DD
+  endDate?: string;   // YYYY-MM-DD
+  active: boolean;
+  imageUrl?: string;
+};
+
+/* ================== STATIC CONTENT ================== */
 const services = [
   { title: "ทำเล็บมือ (ตัดแต่ง + ทาสี)", desc: "เก็บทรง ตัดหนัง ทาเจลเงาวิ้ง", img: "/nail/basic.JPG", alt: "ทำเล็บมือ" },
   { title: "ทำเล็บเท้า", desc: "สปาเท้า + ตัดแต่ง + ทาสีตามใจ", img: "/nail/n5.jpg", alt: "ทำเล็บเท้า" },
@@ -21,21 +81,36 @@ const services = [
   { title: "สปามือ/สปาเท้า", desc: "สครับ + มาสก์ ผิวนุ่มชุ่มชื่น", img: "/nail/wwww.jpg", alt: "สปามือ/เท้า" },
 ];
 
-const features = [
-  { title: "อุปกรณ์สะอาด", desc: "ฆ่าเชื้อทุกครั้งก่อนให้บริการ", emoji: "🧴" },
-  { title: "โทนสีแน่น",   desc: "แบรนด์เจลพรีเมียมติดทนนาน", emoji: "🎀" },
-  { title: "ช่างมือเบา",  desc: "ชำนาญ ใส่ใจทุกรายละเอียด",  emoji: "🪄" },
-  
-];
+/* ================== UTILS ================== */
+const toBool = (v: any) => v === true || v === "true" || v === 1 || v === "1";
 
-const card: React.CSSProperties = {
-  background: "#fff",
-  borderRadius: 16,
-  border: "1px solid #eef2f7",
-  boxShadow: "0 6px 24px rgba(2,6,23,.05)",
-};
+/* ============== CTA Button (Hover ด้วย state, ไม่ใช้ <style jsx>) ============== */
+function CtaLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const [hovered, setHovered] = useState(false);
 
-// ===== Reviews slider =====
+  const hoverStyle: React.CSSProperties = hovered
+    ? {
+        transform: "translateY(-2px)",
+        filter: "brightness(1.06)",
+        boxShadow: "0 16px 34px rgba(176,124,255,.35)",
+      }
+    : {};
+
+  return (
+    <Link
+      href={href}
+      style={{ ...primaryBtn, ...hoverStyle }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setHovered(true)}
+      onBlur={() => setHovered(false)}
+    >
+      {children}
+    </Link>
+  );
+}
+
+/* ================== SUB-COMPONENTS ================== */
 function ReviewsSlider({ reviews }: { reviews: Review[] }) {
   const perPage = 3;
   const pages = Math.max(1, Math.ceil(reviews.length / perPage));
@@ -106,8 +181,219 @@ function ReviewsSlider({ reviews }: { reviews: Review[] }) {
   );
 }
 
-// ===== Map config (embed + fallback) =====
-const MAP_EMBED_PB = ""; // ถ้ามีโค้ด pb จาก "ฝังแผนที่" วางแทนได้เลย
+/** แถบโปรโมชันแบบข้อความเลื่อน */
+function PromoMarquee({ promo }: { promo: Promo }) {
+  if (!promo.active) return null;
+
+  const DURATION_SEC = 35;
+  const REPEAT = 3;
+
+  const range =
+    promo.startDate || promo.endDate
+      ? `${promo.startDate ? dayjs(promo.startDate).format("D MMM YYYY") : "วันนี้"} – ${promo.endDate ? dayjs(promo.endDate).format("D MMM YYYY") : "สิ้นสุดโปรฯ"}`
+      : "";
+
+  const parts = [
+    typeof promo.discountPercent === "number" && !Number.isNaN(promo.discountPercent) ? `ลด ${promo.discountPercent}%` : null,
+    promo.title || null,
+    promo.subtitle || null,
+    range || null,
+  ].filter(Boolean) as string[];
+
+  const segment = `✨ ${parts.join(" • ")} ✨`;
+  const groupItems = Array.from({ length: REPEAT }, () => segment);
+
+  return (
+    <section style={{ maxWidth: 1100, margin: "18px auto 0", padding: "0 16px" }}>
+      <div className="promo-marquee" aria-label="ประกาศโปรโมชัน">
+        <div className="promo-track" style={{ ["--dur" as any]: `${DURATION_SEC}s` }}>
+          <div className="promo-group">
+            {groupItems.map((txt, i) => (
+              <span key={i} className="promo-item">
+                {txt}
+              </span>
+            ))}
+          </div>
+          <div className="promo-group" aria-hidden="true">
+            {groupItems.map((txt, i) => (
+              <span key={`dup-${i}`} className="promo-item">
+                {txt}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ใช้ styled-jsx ที่ใช้งานได้แล้วในไฟล์นี้ */}
+      <style jsx global>{`
+        .promo-marquee {
+          overflow: hidden;
+          border-radius: 18px;
+          border: 1px solid #ffd6ec;
+          background: linear-gradient(135deg, rgba(255, 122, 200, 0.12), rgba(176, 124, 255, 0.18));
+          box-shadow: 0 12px 36px rgba(173, 20, 87, 0.12);
+          padding: 10px 0;
+          -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+          mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+        }
+        .promo-track {
+          display: inline-flex;
+          white-space: nowrap;
+          will-change: transform;
+          animation: promo-marquee-slide var(--dur, 60s) linear infinite;
+        }
+        .promo-group {
+          flex: 0 0 100%;
+          min-width: 100%;
+          display: inline-flex;
+          justify-content: center;
+          gap: 28px;
+          padding: 0 12px;
+        }
+        .promo-item {
+          color: #c2185b;
+          font-weight: 900;
+          letter-spacing: 0.2px;
+          white-space: nowrap;
+        }
+        @keyframes promo-marquee-slide {
+          from {
+            transform: translate3d(0, 0, 0);
+          }
+          to {
+            transform: translate3d(-50%, 0, 0);
+          }
+        }
+      `}</style>
+    </section>
+  );
+}
+
+/* ============== Floating LINE Button (Portal to <body>) ============== */
+function FloatingLineButton({ href }: { href: string }) {
+  const [mounted, setMounted] = useState(false);
+  const [showHint, setShowHint] = useState(true);
+  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    if (!mounted) return;
+    const t = setTimeout(() => setShowHint(false), 6000);
+    return () => clearTimeout(t);
+  }, [mounted]);
+  if (!mounted) return null;
+
+  const css = `
+    .floating-line {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 1000;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border-radius: 999px;
+      background: #06c755;
+      border: 2px solid #06c755;
+      color: #fff;
+      text-decoration: none;
+      font-weight: 900;
+      letter-spacing: .2px;
+      box-shadow: 0 12px 28px rgba(6,199,85,.35);
+      transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+    }
+    .floating-line .icon { display: grid; place-items: center; }
+    .floating-line .label { white-space: nowrap; font-size: 14px; line-height: 1; }
+    .floating-line:hover, .floating-line:focus-visible {
+      filter: brightness(1.03);
+      transform: translateY(-1px);
+      box-shadow: 0 16px 32px rgba(6,199,85,.42);
+    }
+    .floating-line-hint {
+      position: fixed;
+      right: 16px;
+      bottom: 76px;
+      z-index: 1000;
+      background: #ffffff;
+      color: #0f172a;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-weight: 900;
+      box-shadow: 0 12px 30px rgba(15,23,42,.15);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      animation: hint-pop .28s ease-out, hint-pulse 2.5s ease-in-out infinite;
+    }
+    .floating-line-hint::after{
+      content: "";
+      position: absolute;
+      right: 22px;
+      bottom: -6px;
+      width: 12px; height: 12px;
+      background: #fff;
+      border-left: 1px solid #e2e8f0;
+      border-bottom: 1px solid #e2e8f0;
+      transform: rotate(45deg);
+    }
+    .hint-close{
+      margin-left: 2px;
+      background: transparent;
+      border: 0;
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      color: #64748b;
+    }
+    @keyframes hint-pop { from { transform: translateY(6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    @keyframes hint-pulse { 0%,100%{ box-shadow:0 12px 30px rgba(15,23,42,.15);} 50%{ box-shadow:0 16px 36px rgba(6,199,85,.25);} }
+    @supports (bottom: env(safe-area-inset-bottom)) {
+      .floating-line { right: max(16px, env(safe-area-inset-right)); bottom: calc(16px + env(safe-area-inset-bottom)); }
+      .floating-line-hint { right: max(16px, env(safe-area-inset-right)); bottom: calc(76px + env(safe-area-inset-bottom)); }
+    }
+    @media (max-width: 420px) {
+      .floating-line { padding: 12px; }
+      .floating-line .label { display: none; }
+      .floating-line-hint { font-size: 13px; }
+    }
+  `;
+
+  return createPortal(
+    <>
+      {showHint && (
+        <div className="floating-line-hint" role="status" aria-live="polite">
+          จองผ่าน LINE เพื่อรับการแจ้งเตือน
+          <button className="hint-close" aria-label="ปิด" onClick={() => setShowHint(false)}>
+            ×
+          </button>
+        </div>
+      )}
+      <a
+        href={href}
+        className="floating-line"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="เพิ่มเพื่อน LINE"
+        title="เพิ่มเพื่อน LINE"
+      >
+        <span className="icon" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 36 36" fill="none" role="img">
+            <path
+              fill="#fff"
+              d="M18 3C9.72 3 3 8.82 3 15.99c0 3.96 2.16 7.5 5.52 9.9-.18.66-.96 3.6-1.02 3.96 0 0-.03.27.15.39.18.12.39.03.39.03.51-.07 3.33-2.19 3.84-2.58.66.12 1.35.18 2.07.18 8.28 0 15-5.82 15-12.99C29.94 8.82 27.72 3 18 3Z"
+            />
+          </svg>
+        </span>
+        <span className="label">เพิ่มเพื่อน LINE</span>
+      </a>
+      <style dangerouslySetInnerHTML={{ __html: css }} />
+    </>,
+    document.body
+  );
+}
+
+/* ================== MAP CONFIG ================== */
+const MAP_EMBED_PB = "";
 const MAP_QUERY =
   "X4JF+353 ซอย พายัพทิศ 9/11 ตำบลในเมือง อำเภอเมืองนครราชสีมา นครราชสีมา 30000";
 const MAP_LINK = "https://maps.app.goo.gl/pXCb7vJLJs5dhNmE8";
@@ -115,7 +401,35 @@ const MAP_SRC = MAP_EMBED_PB
   ? `https://www.google.com/maps/embed?pb=${MAP_EMBED_PB}`
   : `https://www.google.com/maps?q=${encodeURIComponent(MAP_QUERY)}&z=17&hl=th&output=embed`;
 
+/* ================== PAGE ================== */
 export default function NailHomePage() {
+  // -------- โปรโมชันจาก Admin --------
+  const [promo, setPromo] = useState<Promo>({
+    title: "",
+    subtitle: "",
+    discountPercent: undefined,
+    startDate: "",
+    endDate: "",
+    active: false,
+    imageUrl: "/pic.jpg",
+  });
+
+  useEffect(() => {
+    const unsub = onValue(ref(database, "promotions/current"), (snap) => {
+      const raw = (snap.val() || {}) as any;
+      setPromo({
+        title: raw.title ?? "",
+        subtitle: raw.subtitle ?? "",
+        discountPercent: typeof raw.discountPercent === "number" ? raw.discountPercent : Number(raw.discountPercent) || undefined,
+        startDate: raw.startDate || "",
+        endDate: raw.endDate || "",
+        active: toBool(raw.active),
+        imageUrl: raw.bannerUrl || raw.imageUrl || "/pic.jpg",
+      });
+    });
+    return () => unsub();
+  }, []);
+
   // -------- รีวิว (โหลด/ส่ง) --------
   const [reviews, setReviews] = useState<Review[]>([]);
   const [rvName, setRvName] = useState("");
@@ -127,7 +441,7 @@ export default function NailHomePage() {
     const unsub = onValue(ref(database, "reviews"), (snap) => {
       const val = snap.val() || {};
       const list: Review[] = Object.values(val);
-      list.sort((a, b) => b.createdAt - a.createdAt);
+      list.sort((a, b) => (b as Review).createdAt - (a as Review).createdAt);
       setReviews(list);
     });
     return () => unsub();
@@ -146,7 +460,8 @@ export default function NailHomePage() {
       setSending(true);
       const newRef = push(ref(database, "reviews"));
       await set(newRef, { name, text, createdAt: Date.now() });
-      setRvName(""); setRvText("");
+      setRvName("");
+      setRvText("");
       setMsg("ขอบคุณสำหรับรีวิวค่ะ ✨");
     } catch {
       setMsg("บันทึกไม่สำเร็จ ลองอีกครั้งค่ะ");
@@ -154,6 +469,40 @@ export default function NailHomePage() {
       setSending(false);
     }
   };
+
+  // -------- นับ "จำนวนการจองทั้งหมด" (รวมหมด) --------
+  const [resCount, setResCount] = useState(0);
+  const [payCount, setPayCount] = useState(0);
+
+  useEffect(() => {
+    const unsubRes = onValue(ref(database, "reservations"), (snap) => {
+      const val = snap.val() || {};
+      setResCount(Object.keys(val).length);
+    });
+    const unsubPay = onValue(ref(database, "payments"), (snap) => {
+      const val = snap.val() || {};
+      setPayCount(Object.keys(val).length);
+    });
+    return () => {
+      unsubRes();
+      unsubPay();
+    };
+  }, []);
+
+  const totalBookings = resCount + payCount;
+
+  // การ์ด “ทำไมต้อง Nailties?”
+  const features = useMemo(
+    () => [
+      { title: "อุปกรณ์สะอาด", desc: "ฆ่าเชื้อทุกครั้งก่อนให้บริการ", emoji: "🧴" },
+      { title: "โทนสีแน่น", desc: "แบรนด์เจลพรีเมียมติดทนนาน", emoji: "🎀" },
+      { title: "ช่างมือเบา", desc: "ชำนาญ ใส่ใจทุกรายละเอียด", emoji: "🪄" },
+      { title: "ผู้มาใช้บริการ", desc: `${totalBookings} คน`, emoji: "👤" },
+    ],
+    [totalBookings]
+  );
+
+  const heroImage = promo.imageUrl || "/pic.jpg";
 
   return (
     <div
@@ -168,7 +517,9 @@ export default function NailHomePage() {
       {/* Top Bar */}
       <header
         style={{
-          position: "sticky", top: 0, zIndex: 10,
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
           backdropFilter: "saturate(180%) blur(6px)",
           background: "rgba(255,255,255,.7)",
           borderBottom: "1px solid #f1f5f9",
@@ -176,8 +527,12 @@ export default function NailHomePage() {
       >
         <div
           style={{
-            maxWidth: 1100, margin: "0 auto", padding: "14px 16px",
-            display: "flex", alignItems: "center", gap: 14,
+            maxWidth: 1100,
+            margin: "0 auto",
+            padding: "14px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
           }}
         >
           <Link href="/" style={{ display: "flex", alignItems: "center", gap: 12, textDecoration: "none", color: "#0f172a" }}>
@@ -186,77 +541,74 @@ export default function NailHomePage() {
           </Link>
 
           <nav style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
-            <Link href="/booking" style={primaryBtn}>จองคิว</Link>
-            <a href="#services" style={navBtn}>บริการ</a>
+            <a href="#services" style={navBtn}>Home</a>
             <Link href="/login" style={navBtn}>Login</Link>
           </nav>
         </div>
       </header>
 
-      {/* ===== HERO (รูปซ้าย / ข้อความขวา) ===== */}
+      {/* ===== HERO (เพิ่มปุ่มจองคิวข้างข้อความ) ===== */}
       <section className="hero">
-        {/* รูปโปรโมชัน (ซ้าย) */}
         <div className="hero-visual">
-          <div style={{ ...card, padding: 0, overflow: "hidden" }}>
+          <div style={{ ...cardstyle, padding: 0, overflow: "hidden" }}>
             <Image
-              src="/pic.jpg"
-              alt="โปรโมชันร้านทำเล็บ"
+              src={heroImage}
+              alt="ภาพหน้าร้าน/ธีม"
               width={1080}
               height={1080}
-              style={{ width: "100%", height: "auto", display: "block" }} // แสดงเต็ม ไม่ครอป
+              style={{ width: "100%", height: "auto", display: "block" }}
               priority
             />
           </div>
         </div>
 
-        {/* ข้อความ (ขวา) */}
         <div className="hero-copy">
           <h1 style={{ fontSize: 44, lineHeight: 1.12, margin: "0 0 14px", fontWeight: 900, letterSpacing: -0.5, color: "#c2185b" }}>
             สวยวิ้งทุกปลายนิ้ว
             <br />โทนหวานพาสเทลตามใจคุณ
           </h1>
-          <p style={{ color: "#475569", fontSize: 18, marginBottom: 20, maxWidth: 560 }}>
+          <p style={{ color: "#475569", fontSize: 18, marginBottom: 0, maxWidth: 560 }}>
             เลือกโทนสี ลาย และรูปทรงได้ตามต้องการ — วัสดุพรีเมียม มือเบา ใส่ใจรายละเอียด พร้อมบรรยากาศชิลล์ ๆ ให้คุณผ่อนคลาย
           </p>
-          <div style={{ display: "flex", gap: 12 }}>
-            <Link href="/booking" style={ctaPrimary}>จองคิวตอนนี้</Link>
-            <a href="#services" style={ctaGhost}>ดูบริการ</a>
+
+          {/* ปุ่มจองคิว — ใหญ่ + hover ด้วย state */}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 16, flexWrap: "wrap" }}>
+            <CtaLink href="/booking">จองคิว</CtaLink>
           </div>
-          <div style={{ display: "flex", gap: 10, marginTop: 18, color: "#475569", fontWeight: 600 }}>
+
+          {/* badges */}
+          <div style={{ display: "flex", gap: 10, marginTop: 14, color: "#475569", fontWeight: 600, flexWrap: "wrap" }}>
             <span style={badge}>อุปกรณ์สะอาด</span>
             <span style={badge}>สีติดทน</span>
-            
           </div>
         </div>
 
-       <style jsx>{`
-  .hero {
-    max-width: 1100px;
-    margin: 40px auto 10px;
-    padding: 0 16px;
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 26px;
-    align-items: center;
-  }
-
-  /* mobile: ข้อความก่อน รูปทีหลัง */
-  .hero-copy { order: 1; }
-  .hero-visual { order: 2; }
-
-  @media (min-width: 980px) {
-    /* desktop: ข้อความซ้าย (.9) / รูปขวา (1.1) */
-    .hero { grid-template-columns: .9fr 1.1fr; }
-    .hero-copy { order: 1; }   /* ซ้าย */
-    .hero-visual { order: 2; } /* ขวา */
-  }
-`}</style>
-
+        <style jsx>{`
+          .hero {
+            max-width: 1100px;
+            margin: 40px auto 10px;
+            padding: 0 16px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 26px;
+            align-items: center;
+          }
+          .hero-copy { order: 1; }
+          .hero-visual { order: 2; }
+          @media (min-width: 980px) {
+            .hero { grid-template-columns: .9fr 1.1fr; }
+            .hero-copy { order: 1; }
+            .hero-visual { order: 2; }
+          }
+        `}</style>
       </section>
 
-      {/* Features */}
+      {/* ===== Promo ===== */}
+      <PromoMarquee promo={promo} />
+
+      {/* ===== Features ===== */}
       <section style={{ maxWidth: 1100, margin: "20px auto 0", padding: "0 16px" }}>
-        <div style={{ ...card, padding: 18 }}>
+        <div style={{ ...cardstyle, padding: 18 }}>
           <h2 style={{ margin: "4px 0 14px", fontSize: 22, fontWeight: 900 }}>ทำไมต้อง Nailties?</h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12 }}>
             {features.map((f) => (
@@ -270,12 +622,12 @@ export default function NailHomePage() {
         </div>
       </section>
 
-      {/* Services */}
+      {/* ===== Services ===== */}
       <section id="services" style={{ maxWidth: 1100, margin: "26px auto", padding: "0 16px" }}>
         <h2 style={{ fontSize: 26, fontWeight: 900, margin: "0 0 14px" }}>บริการ</h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 16 }}>
           {services.map((s) => (
-            <div key={s.title} style={{ ...card, padding: 0, overflow: "hidden" }}>
+            <div key={s.title} style={{ ...cardstyle, padding: 0, overflow: "hidden" }}>
               <div style={{ position: "relative", width: "100%", height: 250 }}>
                 <Image
                   src={s.img}
@@ -294,18 +646,14 @@ export default function NailHomePage() {
         </div>
       </section>
 
-      {/* ===== Reviews + Map (อยู่ข้างกัน) ===== */}
+      {/* ===== Reviews + Map ===== */}
       <section className="duo">
-        {/* รีวิว (ซ้าย) */}
-        <div style={{ ...card, padding: 18 }}>
-          <div style={{ fontSize: 16, color: "#334155", fontWeight: 800, marginBottom: 12 }}>
-            รีวิวจากลูกค้า
-          </div>
+        <div style={{ ...cardstyle, padding: 18 }}>
+          <div style={{ fontSize: 16, color: "#334155", fontWeight: 800, marginBottom: 12 }}>รีวิวจากลูกค้า</div>
           <ReviewsSlider reviews={reviews} />
         </div>
 
-        {/* แผนที่ (ขวา) */}
-        <div style={{ ...card, padding: 0, overflow: "hidden" }}>
+        <div style={{ ...cardstyle, padding: 0, overflow: "hidden" }}>
           <div style={{ position: "relative", width: "100%", height: "clamp(260px, 45vh, 480px)" }}>
             <iframe
               src={MAP_SRC}
@@ -353,13 +701,11 @@ export default function NailHomePage() {
         `}</style>
       </section>
 
-      {/* Review Form */}
+      {/* ===== Review Form ===== */}
       <section id="write-review" style={{ maxWidth: 1100, margin: "26px auto 0", padding: "0 16px" }}>
-        <div style={{ ...card, padding: 24, background: "linear-gradient(135deg,#ffe4f3 0%,#efe9ff 100%)" }}>
+        <div style={{ ...cardstyle, padding: 24, background: "linear-gradient(135deg,#ffe4f3 0%,#efe9ff 100%)" }}>
           <div style={{ maxWidth: 680, margin: "0 auto" }}>
-            <h2 style={{ margin: "4px 0 16px", fontSize: 22, fontWeight: 900, color: "#c2185b" }}>
-              เขียนรีวิวของคุณ
-            </h2>
+            <h2 style={{ margin: "4px 0 16px", fontSize: 22, fontWeight: 900, color: "#c2185b" }}>เขียนรีวิวของคุณ</h2>
 
             <form onSubmit={submitReview} style={{ display: "grid", gap: 10 }}>
               <input
@@ -417,62 +763,13 @@ export default function NailHomePage() {
         </div>
       </section>
 
-      {/* Footer */}
+      {/* ===== Floating LINE Button ===== */}
+      <FloatingLineButton href={LINE_ADD_FRIEND_URL} />
+
+      {/* ===== Footer ===== */}
       <footer style={{ borderTop: "1px solid #f1f5f9", padding: "16px 0", textAlign: "center", color: "#64748b", fontSize: 14 }}>
         © {new Date().getFullYear()} Nail Studio — All rights reserved.
       </footer>
     </div>
   );
 }
-
-/* ===== Buttons & chips ===== */
-const navBtn: React.CSSProperties = {
-  padding: "8px 14px",
-  borderRadius: 10,
-  border: "1px solid #e2e8f0",
-  color: "#0f172a",
-  fontWeight: 700,
-  textDecoration: "none",
-  background: "#fff",
-};
-
-const primaryBtn: React.CSSProperties = {
-  padding: "8px 14px",
-  borderRadius: 10,
-  border: "1px solid transparent",
-  background: "linear-gradient(135deg,#ff7ac8,#b07cff)",
-  color: "#fff",
-  fontWeight: 800,
-  textDecoration: "none",
-};
-
-const ctaPrimary: React.CSSProperties = {
-  padding: "12px 16px",
-  borderRadius: 12,
-  border: "none",
-  background: "linear-gradient(135deg,#ff7ac8,#b07cff)",
-  color: "#fff",
-  fontWeight: 900,
-  textDecoration: "none",
-  boxShadow: "0 8px 20px rgba(176,124,255,.25)",
-};
-
-const ctaGhost: React.CSSProperties = {
-  padding: "12px 16px",
-  borderRadius: 12,
-  border: "1px solid #e2e8f0",
-  color: "#0f172a",
-  fontWeight: 900,
-  textDecoration: "none",
-  background: "#fff",
-};
-
-const badge: React.CSSProperties = {
-  background: "#ffe4f3",
-  border: "1px solid #ffd6ec",
-  color: "#c2185b",
-  padding: "6px 10px",
-  borderRadius: 999,
-  fontSize: 12,
-  fontWeight: 800,
-};

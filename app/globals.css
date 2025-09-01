@@ -1,0 +1,64 @@
+/* globals.css */
+html, body, #__next {
+  height: 100%;
+}
+
+html, body {
+  margin: 0;          /* ✅ ตัดขอบขาวบน/ข้าง */
+  padding: 0;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: #f6f8fa;
+  overflow-x: hidden; /* กันล้นแนวนอน */
+}
+
+/* Floating LINE button — bottom-right, stays while scrolling */
+.floating-line {
+  position: fixed;
+  right: 16px;             /* ➜ ย้ายมาขวา */
+  left: auto;              /* กันค่าที่เคยตั้ง left ไว้ */
+  bottom: 16px;            /* fallback ถ้าไม่มี safe-area */
+  z-index: 1000;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+
+  border-radius: 999px;
+  background: #06c755;
+  border: 2px solid #06c755;
+  color: #fff;
+  text-decoration: none;
+  font-weight: 900;
+  letter-spacing: .2px;
+  box-shadow: 0 12px 28px rgba(6,199,85,.35);
+}
+
+.floating-line .icon { display: grid; place-items: center; }
+.floating-line .label { white-space: nowrap; font-size: 14px; line-height: 1; }
+
+.floating-line:hover,
+.floating-line:focus-visible {
+  filter: brightness(1.02);
+  transform: translateY(-1px);
+  box-shadow: 0 16px 32px rgba(6,199,85,.42);
+}
+
+/* Respect iPhone safe-area if available */
+@supports (bottom: env(safe-area-inset-bottom)) {
+  .floating-line {
+    right: max(16px, env(safe-area-inset-right));
+    left: auto;
+    bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+}
+
+/* Mobile: show icon only */
+@media (max-width: 420px) {
+  .floating-line { padding: 12px; }
+  .floating-line .label { display: none; }
+}

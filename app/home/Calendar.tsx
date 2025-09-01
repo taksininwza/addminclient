@@ -1,17 +1,16 @@
+// app/home/Calendar.tsx
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
 import Calendar from "react-calendar";
 import dayjs from "dayjs";
 import "react-calendar/dist/Calendar.css";
-
-// ✅ ดึงสถานะชำระเงินจาก Firebase
 import { database, ref, onValue } from "../../lib/firebase";
 
 interface Reservation {
   appointment_date: string;
-  appointment_time: string;      // เวลาเริ่มเดิม (HH:mm)
-  time_label?: string;           // เช่น "14:00–16:00"
-  duration_hours?: number;       // เช่น 3
+  appointment_time: string;      // HH:mm
+  time_label?: string;           // "14:00–16:00"
+  duration_hours?: number;       // 3
   barber_id: string;
   customer_name: string;
   phone?: string;
@@ -26,8 +25,30 @@ interface Reservation {
 }
 interface Barber { name: string }
 
+interface Payment {
+  date?: string;                 // YYYY-MM-DD
+  time?: string;                 // HH:mm
+  hours?: number;
+  barber?: string;
+  barber_id?: string;
+  customerName?: string;
+  phone?: string;
+  note?: string;
+
+  status?: string;
+  matched?: boolean;
+  payment_status?: string;
+  createdAt?: number;
+  createdAtISO?: string;
+  payment_ref?: string;
+}
+
+type Src = "web" | "line";
+type IdTuple = { id: string; source: Src };
+
 type MergedReservation = {
   ids: string[];
+  idTuples: IdTuple[];           // เก็บ (id, source) สำหรับยกเลิก
   appointment_date: string;
   barber_id: string;
   customer_name: string;
@@ -36,6 +57,7 @@ type MergedReservation = {
   start_time: string;            // HH:mm
   end_time: string;              // HH:mm
   total_hours: number;
+  source: "web" | "line" | "mixed";
 };
 
 type Props = {
@@ -49,18 +71,31 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
   const [selectedReservation, setSelectedReservation] = useState<MergedReservation | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
 
-  // ====== อ่าน payments เพื่อรู้ว่าอะไร "paid" ======
+  /** ===== payments + paid sets ===== */
+  const [payments, setPayments] = useState<Record<string, Payment>>({});
   const [paidIds, setPaidIds] = useState<string[]>([]);
   const [paidRefs, setPaidRefs] = useState<string[]>([]);
 
+  // helpers for status
+  const toLower = (s?: string) => (s || "").toLowerCase();
+  const isCancelled = (s?: string) =>
+    ["cancel", "cancelled", "canceled", "void", "refund", "refunded"].includes(toLower(s));
+  const isPaidWord = (s?: string) =>
+    ["paid", "success", "completed", "confirmed"].includes(toLower(s));
+
   useEffect(() => {
     const unsub = onValue(ref(database, "payments"), (snap) => {
-      const val = snap.val() || {};
+      const val = (snap.val() || {}) as Record<string, Payment>;
+      setPayments(val);
+
       const ids: string[] = [];
       const refs: string[] = [];
-      Object.entries<any>(val).forEach(([pid, p]) => {
+      Object.entries(val).forEach(([pid, p]) => {
         const st = p.payment_status ?? p.status;
-        if (st === "paid" || st === "success" || st === "completed") {
+        // ❗ ถ้ายกเลิกแล้ว ไม่ถือว่า paid
+        if (isCancelled(st)) return;
+        const paid = p.matched === true || isPaidWord(st);
+        if (paid) {
           ids.push(pid);
           if (p.payment_ref) refs.push(String(p.payment_ref));
         }
@@ -74,18 +109,24 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
   const paidIdSet  = useMemo(() => new Set(paidIds),  [paidIds]);
   const paidRefSet = useMemo(() => new Set(paidRefs), [paidRefs]);
 
-  // เช็คว่า reservation นี้จ่ายแล้วหรือยัง
+  // LINE: ถ้ายกเลิกในฟิลด์ไหน ให้ไม่แสดง
   const isReservationPaid = (r: Reservation) => {
-    const st = r.payment_status ?? r.status;
-    if (st === "paid" || st === "success" || st === "completed") return true;
+    if (isCancelled(r.status) || isCancelled(r.payment_status)) return false;
     if (r.payment_id && paidIdSet.has(r.payment_id)) return true;
     if (r.payment_ref && paidRefSet.has(String(r.payment_ref))) return true;
-    return false;
+    return isPaidWord(r.payment_status) || isPaidWord(r.status);
+  };
+
+  // WEB: ถ้ายกเลิก -> ไม่แสดง
+  const isPaymentPaid = (p: Payment) => {
+    if (isCancelled(p.status) || isCancelled(p.payment_status)) return false;
+    if (p.matched === true) return true;
+    return isPaidWord(p.payment_status) || isPaidWord(p.status);
   };
 
   const getBarberName = (id: string) => barbers[id]?.name || id || "ไม่ระบุช่าง";
 
-  // ---- helpers ----
+  // ---- time utils ----
   const t2m = (hhmm: string) => {
     const [h, m] = hhmm.split(":").map((v) => parseInt(v, 10));
     return (isNaN(h) ? 0 : h) * 60 + (isNaN(m) ? 0 : m);
@@ -97,7 +138,13 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     return `${pad(h)}:${pad(m)}`;
   };
 
-  // แยกเวลาเริ่ม/จบ โดยพิจารณา time_label / duration_hours ก่อน
+  const findBarberIdByName = (name?: string): string | undefined => {
+    if (!name) return undefined;
+    const target = name.trim().toLowerCase();
+    const entry = Object.entries(barbers).find(([_, b]) => (b.name || "").trim().toLowerCase() === target);
+    return entry?.[0];
+  };
+
   const parseStartEnd = (res: Reservation) => {
     let startStr: string | undefined;
     let endStr: string | undefined;
@@ -122,9 +169,14 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     return { startM, endM };
   };
 
-  // รวมตาม (วัน/ช่าง/ลูกค้า/phone/line_id) และ merge ช่วงที่ซ้อนทับ/ประชิดกัน
-  const mergeReservations = (items: Array<{ id: string; res: Reservation }>): MergedReservation[] => {
-    const groups = new Map<string, Array<{ id: string; res: Reservation; startM: number; endM: number }>>();
+  /** รวมรายการพร้อมจำที่มา (line/web) */
+  const mergeReservations = (
+    items: Array<{ id: string; res: Reservation; source: Src }>
+  ): MergedReservation[] => {
+    const groups = new Map<
+      string,
+      Array<{ id: string; res: Reservation; source: Src; startM: number; endM: number }>
+    >();
 
     for (const it of items) {
       const { startM, endM } = parseStartEnd(it.res);
@@ -137,35 +189,61 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     for (const [, arr] of groups) {
       arr.sort((a, b) => a.startM - b.startM);
 
-      let cur: { ids: string[]; startM: number; endM: number; base: typeof arr[number] | null } = {
-        ids: [], startM: -1, endM: -1, base: null
-      };
+      let cur:
+        | {
+            ids: string[];
+            tuples: IdTuple[];
+            startM: number;
+            endM: number;
+            base: typeof arr[number];
+            srcSet: Set<Src>;
+          }
+        | null = null;
 
       for (const seg of arr) {
-        if (cur.base === null) {
-          cur = { ids: [seg.id], startM: seg.startM, endM: seg.endM, base: seg };
+        if (!cur) {
+          cur = {
+            ids: [seg.id],
+            tuples: [{ id: seg.id, source: seg.source }],
+            startM: seg.startM,
+            endM: seg.endM,
+            base: seg,
+            srcSet: new Set([seg.source]),
+          };
         } else if (seg.startM <= cur.endM) {
           cur.ids.push(seg.id);
+          cur.tuples.push({ id: seg.id, source: seg.source });
           cur.endM = Math.max(cur.endM, seg.endM);
+          cur.srcSet.add(seg.source);
         } else {
           merged.push({
             ids: cur.ids,
-            appointment_date: cur.base!.res.appointment_date,
-            barber_id: cur.base!.res.barber_id,
-            customer_name: cur.base!.res.customer_name,
-            phone: cur.base!.res.phone,
-            note: cur.base!.res.note,
+            idTuples: cur.tuples,
+            appointment_date: cur.base.res.appointment_date,
+            barber_id: cur.base.res.barber_id,
+            customer_name: cur.base.res.customer_name,
+            phone: cur.base.res.phone,
+            note: cur.base.res.note,
             start_time: m2t(cur.startM),
             end_time: m2t(cur.endM),
             total_hours: (cur.endM - cur.startM) / 60,
+            source: cur.srcSet.size === 2 ? "mixed" : (Array.from(cur.srcSet)[0] as "web" | "line"),
           });
-          cur = { ids: [seg.id], startM: seg.startM, endM: seg.endM, base: seg };
+          cur = {
+            ids: [seg.id],
+            tuples: [{ id: seg.id, source: seg.source }],
+            startM: seg.startM,
+            endM: seg.endM,
+            base: seg,
+            srcSet: new Set([seg.source]),
+          };
         }
       }
 
-      if (cur.base !== null) {
+      if (cur) {
         merged.push({
           ids: cur.ids,
+          idTuples: cur.tuples,
           appointment_date: cur.base.res.appointment_date,
           barber_id: cur.base.res.barber_id,
           customer_name: cur.base.res.customer_name,
@@ -174,6 +252,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
           start_time: m2t(cur.startM),
           end_time: m2t(cur.endM),
           total_hours: (cur.endM - cur.startM) / 60,
+          source: cur.srcSet.size === 2 ? "mixed" : (Array.from(cur.srcSet)[0] as "web" | "line"),
         });
       }
     }
@@ -182,35 +261,83 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     return merged;
   };
 
-  // ✅ ดึงเฉพาะ “การจองที่ชำระแล้ว” มารวม/แสดง
+  /** รวมข้อมูลที่ “ชำระแล้วและไม่ถูกยกเลิก” จาก LINE + WEB */
   const getMergedForDateAndBarber = (date: Date, barberId: string): MergedReservation[] => {
     const day = dayjs(date).format("YYYY-MM-DD");
-    const items = Object.entries(reservations)
+
+    // LINE
+    const resItems = Object.entries(reservations)
       .filter(([, r]) =>
         r.appointment_date === day &&
         (barberId === "" || r.barber_id === barberId) &&
-        isReservationPaid(r) // <- ตรงนี้คือเงื่อนไขหลัก
+        isReservationPaid(r)
       )
-      .map(([id, res]) => ({ id, res }));
-    return mergeReservations(items);
+      .map(([id, res]) => ({ id, res, source: "line" as const }));
+
+    // WEB (แปลงให้เป็นโครง Reservation)
+    const payItems = Object.entries(payments)
+      .filter(([, p]) => p.date === day && isPaymentPaid(p))
+      .filter(([, p]) => {
+        if (!barberId) return true;
+        const pid = p.barber_id || findBarberIdByName(p.barber);
+        return pid ? pid === barberId : true;
+      })
+      .map(([id, p]) => {
+        const pid = p.barber_id || findBarberIdByName(p.barber) || (p.barber || "ไม่ระบุช่าง");
+        const normRes: Reservation = {
+          appointment_date: p.date || day,
+          appointment_time: p.time || "00:00",
+          duration_hours: typeof p.hours === "number" ? p.hours : 1,
+          barber_id: pid,
+          customer_name: p.customerName || "-",
+          phone: p.phone,
+          note: p.note,
+          payment_ref: p.payment_ref,
+          payment_status: p.payment_status ?? p.status,
+          status: p.status,
+        };
+        return { id, res: normRes, source: "web" as const };
+      });
+
+    return mergeReservations([...resItems, ...payItems]);
   };
 
   const selectedList = getMergedForDateAndBarber(selectedDate, selectedBarber);
 
-  // ====== ยกเลิก (ยกเลิกทุก id ในก้อนเดียวกัน) ======
-  const cancelReservation = async (ids: string[]) => {
+  /** ===== ยกเลิกทั้งฝั่ง LINE/WEB ตามชนิด ===== */
+  const cancelReservation = async (tuples: IdTuple[]) => {
     if (!confirm("ยืนยันการยกเลิกคิวนี้ทั้งหมด?")) return;
     setCancelLoading(true);
     try {
-      for (const id of ids) {
-        const res = await fetch("/api/reservations/cancel", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reservationId: id }),
-        });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || "ยกเลิกคิวไม่สำเร็จ");
-      }
+      const lineIds = tuples.filter(t => t.source === "line").map(t => t.id);
+      const webIds  = tuples.filter(t => t.source === "web").map(t => t.id);
+
+      // LINE
+      await Promise.all(
+        lineIds.map(async (id) => {
+          const res = await fetch("/api/reservations/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reservationId: id }),
+          });
+          const json = await res.json();
+          if (!json.ok) throw new Error(json.error || "Reservation cancel failed");
+        })
+      );
+
+      // WEB  (เอกพจน์: /api/payment/cancel)
+      await Promise.all(
+        webIds.map(async (id) => {
+          const res = await fetch("/api/payment/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paymentId: id }),
+          });
+          const json = await res.json();
+          if (!json.ok) throw new Error(json.error || "Payment cancel failed");
+        })
+      );
+
       alert("ยกเลิกคิวสำเร็จ");
       setSelectedReservation(null);
     } catch (e: any) {
@@ -220,13 +347,21 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     }
   };
 
+  // badge บอกแหล่งที่มา
+  const chip = (src: "web" | "line" | "mixed") => {
+    const base: React.CSSProperties = { padding: "2px 8px", borderRadius: 999, fontSize: 12, fontWeight: 800, border: "1px solid" };
+    if (src === "web")  return { ...base, background: "#e0f2fe", color: "#0369a1", borderColor: "#bae6fd" };
+    if (src === "line") return { ...base, background: "#e8f7ee", color: "#0f7a4b", borderColor: "#c8efd9" };
+    return { ...base, background: "#fff6e6", color: "#9a5b00", borderColor: "#ffd9a8" };
+  };
+
   return (
     <div>
       <h1 style={{ fontSize: 32, fontWeight: 700, color: "#22223b", marginBottom: 24 }}>
         📅 ปฏิทินการจอง
       </h1>
 
-      {/* ตัวกรองช่าง */}
+      {/* filter ช่าง */}
       <div style={{ marginBottom: 18 }}>
         <label style={{ fontWeight: 500 }}>
           เลือกช่าง:{" "}
@@ -250,7 +385,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
             value={selectedDate}
             onChange={(v) => setSelectedDate(v as Date)}
             tileContent={({ date }) => {
-              const count = getMergedForDateAndBarber(date, selectedBarber).length;
+              const count = getMergedForDateAndBarber(date as Date, selectedBarber).length;
               return count > 0 ? (
                 <div style={{ fontSize: "0.7em", color: "white", background: "#4caf50", borderRadius: 5, padding: 2, marginTop: 2 }}>
                   {count} รายการ
@@ -284,7 +419,12 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
                     border: "1px solid #e0e0e0",
                   }}
                 >
-                  <div style={{ fontWeight: 600, color: "#4f8cff" }}>{getBarberName(r.barber_id)}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={chip(r.source)}>
+                      {r.source === "web" ? "WEB" : r.source === "line" ? "LINE" : "MIXED"}
+                    </span>
+                    <span style={{ fontWeight: 700, color: "#4f8cff" }}>{getBarberName(r.barber_id)}</span>
+                  </div>
                   <div>
                     🧑 {r.customer_name}{" "}
                     <span style={{ color: "#43e97b", fontWeight: 600 }}>
@@ -312,6 +452,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
           >
             <h3 style={{ fontSize: 22, fontWeight: 700, marginBottom: 18 }}>📋 รายละเอียดการจอง</h3>
 
+            <p><strong>ช่องทาง:</strong> {selectedReservation.source === "web" ? "เว็บ" : selectedReservation.source === "line" ? "ไลน์" : "ผสม"}</p>
             <p><strong>ชื่อ:</strong> {selectedReservation.customer_name}</p>
             <p><strong>เบอร์โทร:</strong> {selectedReservation.phone || "-"}</p>
             <p><strong>ช่าง:</strong> {getBarberName(selectedReservation.barber_id)}</p>
@@ -343,7 +484,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
                 ปิด
               </button>
               <button
-                onClick={() => cancelReservation(selectedReservation.ids)}
+                onClick={() => cancelReservation(selectedReservation.idTuples)}
                 disabled={cancelLoading}
                 style={{ padding: "8px 18px", background: "#e63946", color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, fontSize: 16, cursor: "pointer", opacity: cancelLoading ? 0.7 : 1 }}
               >
