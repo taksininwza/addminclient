@@ -10,7 +10,6 @@ import {
 import {
   database, ref, onValue, query, orderByChild, limitToLast
 } from "../../lib/firebase";
-// ดักรายการที่ถูกลบ (LINE)
 import { onChildRemoved } from "firebase/database";
 
 // ---------- Types ----------
@@ -25,8 +24,9 @@ interface Reservation {
   channel?: "web" | "line";
   source?: "web" | "line";
   via?: "web" | "line";
-  status?: string;          // อาจมี
-  payment_status?: string;  // อาจมี
+  status?: string;
+  payment_status?: string;
+  use_point?: boolean;            // ✅ ใช้แต้มสะสม (จาก LINE)
 }
 type ReservationWithId = Reservation & { id: string };
 
@@ -42,7 +42,8 @@ type Payment = {
   createdAt?: number;
   createdAtISO?: string;
   customerName?: string;
-  payment_status?: string;  // อาจมี
+  payment_status?: string;
+  use_point?: boolean;           // (เผื่อมีจากเว็บ)
 };
 type PaymentWithId = Payment & { id: string };
 
@@ -59,9 +60,18 @@ type UnifiedItem = {
   barberId?: string;
   barberName?: string;
   customerName?: string;
+  usedPoint?: boolean;           // ✅ ติดธงว่าใช้แต้ม
 };
 
 const COLORS = ['#f472b6', '#ec4899', '#fbbf24', '#38bdf8', '#a3e635', '#f87171', '#818cf8', '#facc15', '#34d399', '#fb7185'];
+
+// ---------- Helpers ----------
+const toLower = (s?: string) => (s || "").toLowerCase();
+const boolish = (v: any) => v === true || v === "true" || v === 1 || v === "1";
+const isCancelledWord = (s?: string) =>
+  ["cancel", "cancelled", "canceled", "void", "refund", "refunded"].includes(toLower(s));
+const isPaidWord = (s?: string) =>
+  ["paid", "success", "completed", "confirmed"].includes(toLower(s));
 
 type Props = {
   barbers: Record<string, Barber>;
@@ -71,12 +81,6 @@ type Props = {
   monthlySummary: any[];
   barberSummary: any[];
 };
-
-const toLower = (s?: string) => (s || "").toLowerCase();
-const isCancelledWord = (s?: string) =>
-  ["cancel", "cancelled", "canceled", "void", "refund", "refunded"].includes(toLower(s));
-const isPaidWord = (s?: string) =>
-  ["paid", "success", "completed", "confirmed"].includes(toLower(s));
 
 const DashboardPage: React.FC<Props> = ({
   barbers,
@@ -89,15 +93,13 @@ const DashboardPage: React.FC<Props> = ({
   const getBarberNameById = (id?: string) =>
     (id && barbers[id]?.name) || id || "ไม่ระบุช่าง";
 
-  // ===== Realtime: ล่าสุดจาก reservations + payments (รวมแสดง) =====
+  // ===== Realtime =====
   const [latestReservations, setLatestReservations] = React.useState<ReservationWithId[]>([]);
   const [latestPayments, setLatestPayments] = React.useState<PaymentWithId[]>([]);
-  // เก็บ "รายการจาก LINE ที่ถูกลบ" ล่าสุด (เพื่อแสดงเป็นยกเลิก)
   const [lineRemoved, setLineRemoved] = React.useState<ReservationWithId[]>([]);
   const [latestUnified, setLatestUnified] = React.useState<UnifiedItem[]>([]);
 
   React.useEffect(() => {
-    // ล่าสุด (ตาม created_at) จาก reservations
     const unsubRes = onValue(
       query(ref(database, "reservations"), orderByChild("created_at"), limitToLast(30)),
       (snap) => {
@@ -109,7 +111,6 @@ const DashboardPage: React.FC<Props> = ({
       }
     );
 
-    // ล่าสุดจาก payments (ตาม createdAt)
     const unsubPay = onValue(
       query(ref(database, "payments"), orderByChild("createdAt"), limitToLast(30)),
       (snap) => {
@@ -121,19 +122,18 @@ const DashboardPage: React.FC<Props> = ({
       }
     );
 
-    // ดัก "ลบคิวไลน์" → เก็บไว้เป็น cancelled
     const unsubRemoved = onChildRemoved(ref(database, "reservations"), (snap) => {
       const removed: Reservation | null = (snap.val() as any) || null;
       if (!removed) return;
       const id = snap.key || "";
       const item: ReservationWithId = { id, ...removed };
-      setLineRemoved(prev => [item, ...prev].slice(0, 30)); // เก็บแค่หลังสุดๆ
+      setLineRemoved(prev => [item, ...prev].slice(0, 30));
     });
 
     return () => { unsubRes(); unsubPay(); unsubRemoved(); };
   }, []);
 
-  // แปลงสถานะจาก DB -> UnifiedStatus
+  // map status
   const statusFromReservation = (r: Reservation): UnifiedStatus => {
     const s1 = r.status, s2 = r.payment_status;
     if (isCancelledWord(s1) || isCancelledWord(s2)) return "cancelled";
@@ -141,7 +141,6 @@ const DashboardPage: React.FC<Props> = ({
     if (isPaidWord(s1) || isPaidWord(s2)) return "confirmed";
     return "pending";
   };
-
   const statusFromPayment = (p: Payment): UnifiedStatus => {
     const s1 = p.status, s2 = p.payment_status;
     if (isCancelledWord(s1) || isCancelledWord(s2)) return "cancelled";
@@ -151,7 +150,7 @@ const DashboardPage: React.FC<Props> = ({
   };
 
   React.useEffect(() => {
-    // RES: ปกติ (ยังอยู่ใน DB)
+    // RES
     const resItems: UnifiedItem[] = latestReservations.map((r) => {
       const ts = r.created_at
         ? new Date(r.created_at).getTime()
@@ -173,10 +172,11 @@ const DashboardPage: React.FC<Props> = ({
         barberId: r.barber_id,
         barberName,
         customerName: r.customer_name,
+        usedPoint: boolish((r as any).use_point),           // ✅
       };
     });
 
-    // PAY: จากเว็บ
+    // PAY
     const payItems: UnifiedItem[] = latestPayments.map((p) => {
       const ts =
         (typeof p.createdAt === "number" && p.createdAt) ||
@@ -199,10 +199,11 @@ const DashboardPage: React.FC<Props> = ({
         barberId: p.barber_id,
         barberName,
         customerName: p.customerName,
+        usedPoint: boolish((p as any).use_point),           // ✅ (ถ้ามี)
       };
     });
 
-    // RES_REMOVED: รายการไลน์ที่ถูกลบ → แสดงเป็น cancelled
+    // RES_REMOVED
     const removedItems: UnifiedItem[] = lineRemoved.map((r) => {
       const ts = r.created_at
         ? new Date(r.created_at).getTime()
@@ -222,18 +223,17 @@ const DashboardPage: React.FC<Props> = ({
         barberId: r.barber_id,
         barberName,
         customerName: r.customer_name,
+        usedPoint: boolish((r as any).use_point),           // ✅
       };
     });
 
-    // ให้สถานะที่สำคัญกว่าชนะ
-    // priority: confirmed(3) > mismatch(2) > pending(1) > cancelled(0)
+    // merge priority
     const score = (s: UnifiedStatus) =>
       s === "confirmed" ? 3 :
       s === "mismatch"  ? 2 :
       s === "pending"   ? 1 : 0;
 
     const map = new Map<string, UnifiedItem>();
-
     [...resItems, ...payItems, ...removedItems].forEach((item) => {
       if (!item.key.includes("|")) return;
       const prev = map.get(item.key);
@@ -245,6 +245,10 @@ const DashboardPage: React.FC<Props> = ({
         if (curScore > prevScore || (curScore === prevScore && item.ts > prev.ts)) {
           map.set(item.key, item);
         }
+        // ถ้าทั้งคู่มี key เดียวกัน ให้ preserve ธง usedPoint ถ้าอันใหม่หรืออันเก่ามี
+        const merged = map.get(item.key)!;
+        merged.usedPoint = (prev?.usedPoint || item.usedPoint) ? true : false;
+        map.set(item.key, merged);
       }
     });
 
@@ -285,20 +289,19 @@ const DashboardPage: React.FC<Props> = ({
       return { bg: "#fff6e6", fg: "#9a5b00", bd: "#ffd9a8", text: "ยอดไม่ตรง" };
     }
     if (status === "cancelled") {
-      // 🔴 ปรับให้เป็นโทนแดงชัดเจนตามที่ขอ
       return { bg: "#fee2e2", fg: "#b91c1c", bd: "#fecaca", text: "ยกเลิกแล้ว" };
     }
-    return { bg: "#eef2ff", fg: "#3730a3", bd: "#c7d2fe", text: "รอยืนยัน" }; // pending
+    return { bg: "#eef2ff", fg: "#3730a3", bd: "#c7d2fe", text: "รอยืนยัน" };
   };
+  const pointPill = { bg: "#fef3c7", fg: "#92400e", bd: "#fde68a", text: "ใช้แต้ม" }; // ✅ สีเหลือง
 
-  // ===== Styles: เต็มหน้าจอ / responsive
+  // ===== Styles =====
   const pageWrap: React.CSSProperties = {
     minHeight: "calc(100vh - 0px)",
     width: "100%",
     background: "#f6f8fb",
     padding: "16px 16px 28px",
   };
-
   const gridSummary: React.CSSProperties = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
@@ -306,26 +309,18 @@ const DashboardPage: React.FC<Props> = ({
     marginBottom: 18,
     width: "100%",
   };
-
   const cardSummary: React.CSSProperties = {
     borderRadius: 16,
     color: "#fff",
     padding: 24,
   };
-
-  const rail: React.CSSProperties = {
-    width: "100%",
-    display: "grid",
-    gap: 16,
-  };
-
+  const rail: React.CSSProperties = { width: "100%", display: "grid", gap: 16 };
   const twoCol: React.CSSProperties = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
     gap: 16,
     width: "100%",
   };
-
   const card: React.CSSProperties = {
     background: "#fff",
     borderRadius: 16,
@@ -351,13 +346,14 @@ const DashboardPage: React.FC<Props> = ({
       <div style={rail}>
         {/* การจองล่าสุด (รวม) */}
         <div style={card}>
-          <h2 style={{ fontSize: 22, fontWeight: 800, marginBottom: 12 }}>การจองล่าสุด (รวม)</h2>
+          <h2 style={{ fontSize: 22, fontWeight: 800, marginBottom: 12 }}>การจองล่าสุด </h2>
           {latestUnified.length === 0 ? (
             <p>กำลังโหลด...</p>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
               {latestUnified.map((item, idx) => {
                 const s = pillStyle(item.status);
+                const rowBg = item.usedPoint ? "#fffbeb" : "transparent"; // ✅ พื้นหลังเหลืองอ่อนมาก
                 return (
                   <li
                     key={item.id || idx}
@@ -366,7 +362,9 @@ const DashboardPage: React.FC<Props> = ({
                       justifyContent: "space-between",
                       alignItems: "center",
                       padding: "12px 6px",
-                      borderBottom: idx !== latestUnified.length - 1 ? "1px solid #f1f5f9" : "none"
+                      borderBottom: idx !== latestUnified.length - 1 ? "1px solid #f1f5f9" : "none",
+                      background: rowBg,
+                      borderRadius: 10,
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -377,6 +375,18 @@ const DashboardPage: React.FC<Props> = ({
                       }}>
                         {s.text}
                       </span>
+
+                      {/* ✅ ป้าย "ใช้แต้ม" สีเหลือง */}
+                      {item.usedPoint && (
+                        <span style={{
+                          padding: "4px 10px", borderRadius: 999,
+                          background: pointPill.bg, color: pointPill.fg,
+                          fontWeight: 800, fontSize: 13, border: `1px solid ${pointPill.bd}`
+                        }}>
+                          {pointPill.text}
+                        </span>
+                      )}
+
                       <span style={{ fontWeight: 700, color: "#4f8cff" }}>{item.barberName || "ไม่ระบุช่าง"}</span>
                       <span style={{ color: "#475569" }}>{item.customerName || "-"}</span>
                     </div>

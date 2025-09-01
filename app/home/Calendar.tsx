@@ -22,6 +22,9 @@ interface Reservation {
   payment_ref?: string;
   payment_status?: string;       // หรือ status
   status?: string;
+
+  // ✅ ธงใช้แต้ม
+  use_point?: boolean | string | number;
 }
 interface Barber { name: string }
 
@@ -41,6 +44,9 @@ interface Payment {
   createdAt?: number;
   createdAtISO?: string;
   payment_ref?: string;
+
+  // ✅ เผื่อมีจากเว็บ
+  use_point?: boolean | string | number;
 }
 
 type Src = "web" | "line";
@@ -58,6 +64,7 @@ type MergedReservation = {
   end_time: string;              // HH:mm
   total_hours: number;
   source: "web" | "line" | "mixed";
+  usedPoint?: boolean;           // ✅ ใช้แต้มสะสมหรือไม่ (รวม)
 };
 
 type Props = {
@@ -76,8 +83,9 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
   const [paidIds, setPaidIds] = useState<string[]>([]);
   const [paidRefs, setPaidRefs] = useState<string[]>([]);
 
-  // helpers for status
+  // helpers
   const toLower = (s?: string) => (s || "").toLowerCase();
+  const boolish = (v: any) => v === true || v === "true" || v === 1 || v === "1";
   const isCancelled = (s?: string) =>
     ["cancel", "cancelled", "canceled", "void", "refund", "refunded"].includes(toLower(s));
   const isPaidWord = (s?: string) =>
@@ -92,8 +100,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
       const refs: string[] = [];
       Object.entries(val).forEach(([pid, p]) => {
         const st = p.payment_status ?? p.status;
-        // ❗ ถ้ายกเลิกแล้ว ไม่ถือว่า paid
-        if (isCancelled(st)) return;
+        if (isCancelled(st)) return;           // ห้ามนับถ้ายกเลิก
         const paid = p.matched === true || isPaidWord(st);
         if (paid) {
           ids.push(pid);
@@ -169,20 +176,20 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     return { startM, endM };
   };
 
-  /** รวมรายการพร้อมจำที่มา (line/web) */
+  /** รวมรายการพร้อมจำที่มา (line/web) + บอกว่าใช้แต้มไหม */
   const mergeReservations = (
-    items: Array<{ id: string; res: Reservation; source: Src }>
+    items: Array<{ id: string; res: Reservation; source: Src; usedPoint?: boolean }>
   ): MergedReservation[] => {
     const groups = new Map<
       string,
-      Array<{ id: string; res: Reservation; source: Src; startM: number; endM: number }>
+      Array<{ id: string; res: Reservation; source: Src; startM: number; endM: number; usedPoint: boolean }>
     >();
 
     for (const it of items) {
       const { startM, endM } = parseStartEnd(it.res);
       const key = `${it.res.appointment_date}|${it.res.barber_id}|${it.res.customer_name}|${it.res.phone ?? ""}|${it.res.line_user_id ?? ""}`;
       if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push({ ...it, startM, endM });
+      groups.get(key)!.push({ ...it, startM, endM, usedPoint: !!it.usedPoint });
     }
 
     const merged: MergedReservation[] = [];
@@ -197,6 +204,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
             endM: number;
             base: typeof arr[number];
             srcSet: Set<Src>;
+            usedPoint: boolean;
           }
         | null = null;
 
@@ -209,12 +217,14 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
             endM: seg.endM,
             base: seg,
             srcSet: new Set([seg.source]),
+            usedPoint: seg.usedPoint,
           };
         } else if (seg.startM <= cur.endM) {
           cur.ids.push(seg.id);
           cur.tuples.push({ id: seg.id, source: seg.source });
           cur.endM = Math.max(cur.endM, seg.endM);
           cur.srcSet.add(seg.source);
+          cur.usedPoint = cur.usedPoint || seg.usedPoint;   // ✅ ถ้ามีช่วงไหนใช้แต้ม ให้รวมเป็น true
         } else {
           merged.push({
             ids: cur.ids,
@@ -228,6 +238,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
             end_time: m2t(cur.endM),
             total_hours: (cur.endM - cur.startM) / 60,
             source: cur.srcSet.size === 2 ? "mixed" : (Array.from(cur.srcSet)[0] as "web" | "line"),
+            usedPoint: cur.usedPoint,
           });
           cur = {
             ids: [seg.id],
@@ -236,6 +247,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
             endM: seg.endM,
             base: seg,
             srcSet: new Set([seg.source]),
+            usedPoint: seg.usedPoint,
           };
         }
       }
@@ -253,6 +265,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
           end_time: m2t(cur.endM),
           total_hours: (cur.endM - cur.startM) / 60,
           source: cur.srcSet.size === 2 ? "mixed" : (Array.from(cur.srcSet)[0] as "web" | "line"),
+          usedPoint: cur.usedPoint,
         });
       }
     }
@@ -272,7 +285,12 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
         (barberId === "" || r.barber_id === barberId) &&
         isReservationPaid(r)
       )
-      .map(([id, res]) => ({ id, res, source: "line" as const }));
+      .map(([id, res]) => ({
+        id,
+        res,
+        source: "line" as const,
+        usedPoint: boolish((res as any).use_point), // ✅
+      }));
 
     // WEB (แปลงให้เป็นโครง Reservation)
     const payItems = Object.entries(payments)
@@ -295,8 +313,9 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
           payment_ref: p.payment_ref,
           payment_status: p.payment_status ?? p.status,
           status: p.status,
+          use_point: p.use_point, // ✅ เผื่อกรณีชำระบนเว็บแล้วใช้แต้ม
         };
-        return { id, res: normRes, source: "web" as const };
+        return { id, res: normRes, source: "web" as const, usedPoint: boolish(p.use_point) };
       });
 
     return mergeReservations([...resItems, ...payItems]);
@@ -325,7 +344,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
         })
       );
 
-      // WEB  (เอกพจน์: /api/payment/cancel)
+      // WEB
       await Promise.all(
         webIds.map(async (id) => {
           const res = await fetch("/api/payment/cancel", {
@@ -347,12 +366,22 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     }
   };
 
-  // badge บอกแหล่งที่มา
+  // badge แหล่งที่มา
   const chip = (src: "web" | "line" | "mixed") => {
     const base: React.CSSProperties = { padding: "2px 8px", borderRadius: 999, fontSize: 12, fontWeight: 800, border: "1px solid" };
     if (src === "web")  return { ...base, background: "#e0f2fe", color: "#0369a1", borderColor: "#bae6fd" };
     if (src === "line") return { ...base, background: "#e8f7ee", color: "#0f7a4b", borderColor: "#c8efd9" };
     return { ...base, background: "#fff6e6", color: "#9a5b00", borderColor: "#ffd9a8" };
+  };
+  // ✅ ป้าย “ใช้แต้ม”
+  const pointChip: React.CSSProperties = {
+    padding: "2px 8px",
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 900,
+    background: "#fef3c7",
+    color: "#92400e",
+    border: "1px solid #fde68a",
   };
 
   return (
@@ -415,14 +444,15 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
                     padding: "12px 18px",
                     marginBottom: 10,
                     borderRadius: 10,
-                    background: "#f9f9f9",
+                    background: r.usedPoint ? "#fffbeb" : "#f9f9f9", // ✅ พื้นหลังเหลืองอ่อนเมื่อใช้แต้ม
                     border: "1px solid #e0e0e0",
                   }}
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <span style={chip(r.source)}>
                       {r.source === "web" ? "WEB" : r.source === "line" ? "LINE" : "MIXED"}
                     </span>
+                    {r.usedPoint && <span style={pointChip}>ใช้แต้ม</span>}
                     <span style={{ fontWeight: 700, color: "#4f8cff" }}>{getBarberName(r.barber_id)}</span>
                   </div>
                   <div>
@@ -459,6 +489,23 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
             <p><strong>เวลา:</strong> {selectedReservation.start_time}–{selectedReservation.end_time}</p>
             <p><strong>ระยะเวลา:</strong> {selectedReservation.total_hours} ชั่วโมง</p>
             <p><strong>หมายเหตุ:</strong> {selectedReservation.note || "-"}</p>
+
+            {/* ✅ แสดงส่วนลดเมื่อใช้แต้ม */}
+            {selectedReservation.usedPoint && (
+              <div
+                style={{
+                  marginTop: 10,
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  color: "#92400e",
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  fontWeight: 800,
+                }}
+              >
+                ⭐ ใช้แต้ม: ลด 50% 
+              </div>
+            )}
 
             <div style={{ fontWeight: 700, marginTop: 12 }}>หมายเลขการจอง</div>
             <div
