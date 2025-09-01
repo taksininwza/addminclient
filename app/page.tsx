@@ -768,7 +768,7 @@ export default function NailHomePage() {
 
       {/* ===== Footer ===== */}
       <footer style={{ borderTop: "1px solid #f1f5f9", padding: "16px 0", textAlign: "center", color: "#64748b", fontSize: 14 }}>
-        © {new Date().getFullYear()} Nail Studio — All rights reserved.
+        © {new Date().getFullYear()} Nailties Studio — All rights reserved.
       </footer>
     </div>
   );
