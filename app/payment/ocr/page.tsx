@@ -4,6 +4,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Tesseract from 'tesseract.js';
+import Image from 'next/image';
+
 
 const PINK = '#F48FB1';
 const DEEP_PINK = '#AD1457';
@@ -385,13 +387,22 @@ export default function OcrPage() {
     <div style={{ minHeight: '100dvh', background: BG, display: 'grid', placeItems: 'center', padding: 16 }}>
       <div style={{ width: '100%', maxWidth: 860, display: 'grid', gap: 16 }}>
         {/* Header */}
-        <div style={{ background: '#fff', borderRadius: 18, padding: 18, display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 6px 24px rgba(0,0,0,0.08)' }}>
-          <div style={{ width: 40, height: 40, borderRadius: 9999, background: PINK, display: 'grid', placeItems: 'center', color: '#fff', fontWeight: 800 }}>OCR</div>
-          <div>
-            <div style={{ color: DEEP_PINK, fontWeight: 900, fontSize: 22 }}>อัปโหลดสลิปเพื่อยืนยันการชำระ</div>
-            <div style={{ color: '#666' }}>สแกน QR โอน → อัปโหลดสลิป ระบบจะอ่านยอด</div>
-          </div>
-        </div>
+      <div style={{ background: '#fff', borderRadius: 18, padding: 18, display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 6px 24px rgba(0,0,0,0.08)' }}>
+  <div style={{ width: 44, height: 44, borderRadius: 12, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,.06)' }}>
+    <Image
+      src="/logo.png"              // ← เปลี่ยน path ได้ตามไฟล์โลโก้ของคุณ
+      alt="Nailties logo"
+      width={44}
+      height={44}
+      priority
+      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+    />
+  </div>
+  <div>
+    <div style={{ color: DEEP_PINK, fontWeight: 900, fontSize: 22 }}>อัปโหลดสลิปเพื่อยืนยันการชำระ</div>
+    <div style={{ color: '#666' }}>สแกน QR โอน → อัปโหลดสลิป ระบบจะอ่านยอด</div>
+  </div>
+</div>
 
         {/* QR */}
         <Card title="สแกนเพื่อชำระ (PromptPay)">

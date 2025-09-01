@@ -541,7 +541,7 @@ export default function NailHomePage() {
           </Link>
 
           <nav style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
-            <a href="#services" style={navBtn}>Home</a>
+            <a href="#" style={navBtn}>Home</a>
             <Link href="/login" style={navBtn}>Login</Link>
           </nav>
         </div>

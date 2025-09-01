@@ -338,7 +338,7 @@ export default function BookingPage() {
 
           <nav style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
             <Link href="/booking" style={primaryBtn}>จองคิว</Link>
-            <Link href="/" style={navBtn}>บริการ</Link>
+            <Link href="/" style={navBtn}>Home</Link>
             <Link href="/login" style={navBtn}>Login</Link>
           </nav>
         </div>
