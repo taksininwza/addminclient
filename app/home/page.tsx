@@ -147,7 +147,7 @@ const HomePage: React.FC = () => {
           }}
         >
           <div style={{ fontWeight: 800, fontSize: 20, letterSpacing: .2 }}>
-            💈 Addmin Barber
+             Admin
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
            
