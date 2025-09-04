@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import Tesseract from 'tesseract.js';
 import Image from 'next/image';
 import QRCode from 'qrcode';
+import generatePayload from 'promptpay-qr';
 
 // RTDB (client)
 import { database, ref, onValue, remove } from '@/lib/firebase';
@@ -97,20 +98,25 @@ export default function OcrClient() {
   }
 
   useEffect(() => {
-    (async () => {
-      if (!promptpayId || totalExpected <= 0) {
-        setQrDataUrl(null);
-        return;
-      }
-      const payload = buildPromptPayPayload(promptpayId, totalExpected, refCode);
-      const url = await QRCode.toDataURL(payload, {
-        width: 512,
-        errorCorrectionLevel: 'M',
-        margin: 2,
-      });
-      setQrDataUrl(url);
-    })().catch(() => setQrDataUrl(null));
-  }, [promptpayId, totalExpected, refCode]);
+  (async () => {
+    if (!promptpayId || totalExpected <= 0) {
+      setQrDataUrl(null);
+      return;
+    }
+
+    // ❌ อย่าใส่ { reference: ... } เพราะ type ไม่รองรับ
+    const payload = generatePayload(promptpayId, {
+      amount: Number(totalExpected.toFixed(2)),
+    });
+
+    const url = await QRCode.toDataURL(payload, {
+      width: 512,
+      errorCorrectionLevel: 'M',
+      margin: 2,
+    });
+    setQrDataUrl(url);
+  })().catch(() => setQrDataUrl(null));
+}, [promptpayId, totalExpected]);
 
   // -------- OCR state --------
   const [fileUrl, setFileUrl] = useState<string | null>(null);
