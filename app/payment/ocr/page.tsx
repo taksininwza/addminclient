@@ -1,11 +1,13 @@
-// app/payment/ocr/page.tsx
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Tesseract from 'tesseract.js';
 import Image from 'next/image';
 
+// ✅ ใช้ client RTDB helpers
+import { database, ref, onValue, remove } from '@/lib/firebase';
+import { runTransaction, update } from 'firebase/database';
 
 const PINK = '#F48FB1';
 const DEEP_PINK = '#AD1457';
@@ -14,7 +16,13 @@ const BG = '#FFF7FB';
 // ---------- Config ----------
 const API_BASE = '/api';
 const FETCH_URL = `${API_BASE}/payment/confirm`;
-const UNIT_PER_HOUR = Number(process.env.NEXT_PUBLIC_DEPOSIT_AMOUNT || 100); // ค่าจอง/ชั่วโมง
+const UNIT_PER_HOUR = Number(process.env.NEXT_PUBLIC_DEPOSIT_AMOUNT || 100);
+
+// soft-hold config
+const HOLD_PATH = (date: string, barberId: string, time: string) =>
+  `slot_holds/${date}/${barberId}/${time}`;
+const HOLD_KEEPALIVE_MS = 10_000;
+const HOLD_TTL_MS = 25_000;
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -47,6 +55,7 @@ export default function OcrPage() {
   const time         = params.get('time')    || '';   // HH:mm
   const hoursStr     = params.get('hours')   || '1';
   const barber       = params.get('barber')  || '';
+  const barberId     = params.get('barberId') || '';  // <— สำคัญกับ hold
   const minutes      = useMemo(() => parseInt(params.get('minutes') || '15', 10), [params]);
 
   const hoursNum = useMemo(() => {
@@ -54,33 +63,31 @@ export default function OcrPage() {
     return Number.isFinite(h) && h > 0 ? Math.floor(h) : 1;
   }, [hoursStr]);
 
-  // ทศนิยม .xx จาก ref (สำรองในกรณี expectedParam ไม่มี)
+  // unique .xx
   const fracFromRef = useMemo(() => {
     let v = 0;
     for (const ch of refCode) v = (v * 31 + ch.charCodeAt(0)) % 100;
-    return v / 100; // 0.xx
+    return v / 100;
   }, [refCode]);
 
-  // ใช้ .xx เดิมจาก expectedParam ถ้ามี มิฉะนั้นใช้จาก ref
   const uniqueFrac = useMemo(() => {
     const cents = Math.round((expectedParam % 1) * 100);
     return (cents > 0 ? cents : Math.round(fracFromRef * 100)) / 100;
   }, [expectedParam, fracFromRef]);
 
-  // ✅ ยอดตามชั่วโมง = ค่าชม. * ชั่วโมง + .xx
   const totalExpected = useMemo(
     () => Number((UNIT_PER_HOUR * hoursNum + uniqueFrac).toFixed(2)),
     [hoursNum, uniqueFrac]
   );
 
-  // -------- สร้าง slotId เพื่อล็อกคิว --------
+  // slotId
   const slotId = useMemo(() => {
     const sanitize = (s: string) => s.trim().replace(/\s+/g, '-').replace(/[.#$/[\]]/g, '-').toUpperCase();
     const tSafe = time.replace(':', '-');
     return `${sanitize(barber)}_${sanitize(date)}_${sanitize(tSafe)}`;
   }, [barber, date, time]);
 
-  // -------- QR url --------
+  // QR url
   const qrUrl = useMemo(() => {
     const amt = Math.max(0, totalExpected);
     return `${API_BASE}/payment/qr?amount=${encodeURIComponent(amt.toFixed(2))}&ref=${encodeURIComponent(refCode)}`;
@@ -98,7 +105,116 @@ export default function OcrPage() {
   const [showBookedPopup, setShowBookedPopup] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
 
-  // -------- helpers --------
+  // ===== SOFT-HOLD =====
+  const [myHoldAcquired, setMyHoldAcquired] = useState(false);
+  const keepAliveTimerRef = useRef<number | null>(null);
+  const myClientId = useMemo(() => {
+    const key = 'nailties_client_id';
+    let id: string | null = null;
+    try { id = localStorage.getItem(key); } catch {}
+    if (!id) {
+      id = 'C' + Math.random().toString(36).slice(2, 10).toUpperCase();
+      try { localStorage.setItem(key, id); } catch {}
+    }
+    return id || 'C-UNKNOWN';
+  }, []);
+
+  const holdRef = useMemo(() => {
+    if (!date || !time || !barberId) return null;
+    return ref(database, HOLD_PATH(date, barberId, time));
+  }, [date, time, barberId]);
+
+  // พยายามยึด hold
+ useEffect(() => {
+  if (!holdRef) return;
+
+  let cancelled = false;
+
+  runTransaction(holdRef as any, (current: any) => {
+    const now = Date.now();
+    const alive = current && Number(current.expires_at_ms) > now;
+    if (alive && current.owner && current.owner !== myClientId) {
+      return current; // มีคนถืออยู่
+    }
+    return {
+      owner: myClientId,
+      refCode,
+      created_at_ms: current?.created_at_ms || now,
+      expires_at_ms: now + HOLD_TTL_MS,
+    };
+  }).then((res: any) => {
+    if (cancelled || !res?.snapshot) return;
+    const v = res.snapshot.val();                 // ✅ เรียกฟังก์ชันตรง ๆ
+    const now = Date.now();
+    const alive = v && Number(v.expires_at_ms) > now;
+    const mine = alive && v.owner === myClientId;
+    if (!mine) setShowBookedPopup(true);
+    else setMyHoldAcquired(true);
+  });
+
+  const unsub = onValue(holdRef as any, (snap: any) => {
+    if (!snap) return;
+    const v = snap.val();                         // ✅ เรียกฟังก์ชันตรง ๆ
+    if (!v) return;
+    const now = Date.now();
+    const alive = Number(v.expires_at_ms) > now;
+    if (alive && v.owner && v.owner !== myClientId) {
+      setShowBookedPopup(true);
+    }
+  });
+
+  return () => {
+    cancelled = true;
+    // ป้องกันกรณี unsub ไม่ใช่ฟังก์ชัน
+    try { typeof unsub === 'function' && unsub(); } catch {}
+  };
+}, [holdRef, myClientId, refCode]);
+
+
+  // keep-alive
+  useEffect(() => {
+    if (!holdRef || !myHoldAcquired) return;
+
+    // --- keep-alive effect ---
+function ping() {
+  const now = Date.now();
+  update(holdRef as any, { expires_at_ms: now + HOLD_TTL_MS }).catch(() => {});
+}
+
+ping();
+const t = window.setInterval(ping, HOLD_KEEPALIVE_MS);
+keepAliveTimerRef.current = t;
+
+// ✅ เช็กก่อนค่อย remove
+const offUnload = () => {
+  try { if (holdRef) remove(holdRef as any); } catch {}
+};
+
+window.addEventListener('beforeunload', offUnload);
+window.addEventListener('pagehide', offUnload);
+
+return () => {
+  if (keepAliveTimerRef.current) {
+    window.clearInterval(keepAliveTimerRef.current);
+    keepAliveTimerRef.current = null;
+  }
+  window.removeEventListener('beforeunload', offUnload);
+  window.removeEventListener('pagehide', offUnload);
+
+  // ✅ เช็กก่อนค่อย remove
+  try { if (holdRef) remove(holdRef as any); } catch {}
+};
+
+  }, [holdRef, myHoldAcquired]);
+
+  // ถ้าโดนแย่ง → กลับหน้า booking
+  useEffect(() => {
+    if (!showBookedPopup) return;
+    const to = setTimeout(() => router.replace('/booking'), 1200);
+    return () => clearTimeout(to);
+  }, [showBookedPopup, router]);
+
+  // -------- OCR helpers --------
   function extractAmount(text: string): number | undefined {
     const cleaned = text.replace(/[,\s]+/g, ' ');
     const tokens = cleaned.match(/\d+(?:[ .]\d{3})*(?:[.,]\d{2})|\d+[.,]\d{2}/g) || [];
@@ -109,9 +225,6 @@ export default function OcrPage() {
       .map((t) => Number(t))
       .filter((n) => Number.isFinite(n));
 
-    if (candidates.length === 0) return undefined;
-
-    // เลือกที่ใกล้ totalExpected ที่สุด
     let best = candidates[0];
     let bestDiff = Math.abs(best - totalExpected);
     for (const n of candidates) {
@@ -135,8 +248,7 @@ export default function OcrPage() {
     const h = Math.round(bitmap.height * ratio);
 
     const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d')!;
     ctx.drawImage(bitmap, 0, 0, w, h);
 
@@ -186,7 +298,7 @@ export default function OcrPage() {
     setTimeout(() => runOcr(url), 50);
   }
 
-  // -------- ยืนยัน: เรียก API -> บันทึก -> แสดงสรุป --------
+  // -------- ยืนยัน --------
   async function handleConfirm() {
     if (!isOk || running || !fileUrl) return;
     try {
@@ -201,10 +313,11 @@ export default function OcrPage() {
         hours: hoursNum,
         barber,
         amountRead: result?.amount ?? null,
-        expected: totalExpected,   // ✅ ส่งยอดตามชั่วโมง
+        expected: totalExpected,
         matched: isOk,
         createdAtISO: new Date().toISOString(),
         slotId,
+        barberId,
       };
 
       const res = await fetch(FETCH_URL, {
@@ -222,7 +335,8 @@ export default function OcrPage() {
         throw new Error(j?.error || res.statusText || 'บันทึกข้อมูลไม่สำเร็จ');
       }
 
-      setShowSummary(true); // ✅ เปิดสรุป
+      if (holdRef) { try { await remove(holdRef as any); } catch {} }
+      setShowSummary(true);
     } catch (err: any) {
       console.error(err);
       setError(err?.message || 'บันทึกข้อมูลไม่สำเร็จ กรุณาลองใหม่');
@@ -231,14 +345,17 @@ export default function OcrPage() {
     }
   }
 
-  // ✅ ปุ่มยกเลิก -> กลับหน้า “จองคิว” ใหม่
-  function handleCancel() {
-    // ทำความสะอาด objectURL ก่อน (ถ้ามี)
-    if (fileUrl) URL.revokeObjectURL(fileUrl);
-    router.push('/booking');
+  // ยกเลิก
+  async function handleCancel() {
+    try {
+      if (fileUrl) URL.revokeObjectURL(fileUrl);
+      if (holdRef) { try { await remove(holdRef as any); } catch {} }
+    } finally {
+      router.push('/booking');
+    }
   }
 
-  // -------- เงื่อนไขผ่าน --------
+  // ผ่าน OCR?
   const isOk =
     !!result &&
     result.amount !== undefined &&
@@ -257,14 +374,12 @@ export default function OcrPage() {
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
   }, [mounted, minutes]);
-  const remMM = Math.floor(remainSec / 60);
-  const remSS = remainSec % 60;
 
   useEffect(() => {
     return () => { if (fileUrl) URL.revokeObjectURL(fileUrl); };
   }, [fileUrl]);
 
-  // ====== Utils สำหรับ Summary / Save ======
+  // summary text
   const startLocal = useMemo(() => {
     if (!date || !time) return null;
     return new Date(`${date}T${time}:00`);
@@ -290,35 +405,24 @@ export default function OcrPage() {
     ].join('\n');
   }, [customerName, serviceType, barber, date, time, hoursNum, totalExpected, refCode]);
 
-  const icsHref = useMemo(() => {
-    if (!startLocal || !endLocal) return undefined;
-    const toICS = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
-    const ics = [
-      'BEGIN:VCALENDAR',
-      'VERSION:2.0',
-      'PRODID:-//Nailties//Booking//TH',
-      'CALSCALE:GREGORIAN',
-      'METHOD:PUBLISH',
-      'BEGIN:VEVENT',
-      `UID:${refCode}@nailties`,
-      `DTSTAMP:${toICS(new Date())}`,
-      `DTSTART:${toICS(startLocal)}`,
-      `DTEND:${toICS(endLocal)}`,
-      `SUMMARY:${serviceType || 'ทำเล็บ'} - ${barber || 'ไม่ระบุช่าง'}`,
-      `DESCRIPTION:${bookingText.replace(/\n/g, '\\n')}`,
-      'END:VEVENT',
-      'END:VCALENDAR',
-    ].join('\r\n');
-    return `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`;
-  }, [startLocal, endLocal, serviceType, barber, bookingText, refCode]);
-
   async function copySummary() {
     try {
       await navigator.clipboard.writeText(bookingText);
-      alert('คัดลอกข้อมูลการจองแล้ว ✓');
+      alert('คัดลอกข้อมูลสรุปแล้ว ✓');
     } catch {
       alert('คัดลอกไม่สำเร็จ');
     }
+  }
+
+  function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
   }
 
   async function downloadCardPng() {
@@ -372,46 +476,25 @@ export default function OcrPage() {
     }, 'image/png', 0.95);
   }
 
-  function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-    const rr = Math.min(r, w / 2, h / 2);
-    ctx.beginPath();
-    ctx.moveTo(x + rr, y);
-    ctx.arcTo(x + w, y, x + w, y + h, rr);
-    ctx.arcTo(x + w, y + h, x, y + h, rr);
-    ctx.arcTo(x, y + h, x, y, rr);
-    ctx.arcTo(x, y, x + w, y, rr);
-    ctx.closePath();
-  }
 
   return (
     <div style={{ minHeight: '100dvh', background: BG, display: 'grid', placeItems: 'center', padding: 16 }}>
       <div style={{ width: '100%', maxWidth: 860, display: 'grid', gap: 16 }}>
         {/* Header */}
-      <div style={{ background: '#fff', borderRadius: 18, padding: 18, display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 6px 24px rgba(0,0,0,0.08)' }}>
-  <div style={{ width: 44, height: 44, borderRadius: 12, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,.06)' }}>
-    <Image
-      src="/logo.png"              // ← เปลี่ยน path ได้ตามไฟล์โลโก้ของคุณ
-      alt="Nailties logo"
-      width={44}
-      height={44}
-      priority
-      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-    />
-  </div>
-  <div>
-    <div style={{ color: DEEP_PINK, fontWeight: 900, fontSize: 22 }}>อัปโหลดสลิปเพื่อยืนยันการชำระ</div>
-    <div style={{ color: '#666' }}>สแกน QR โอน → อัปโหลดสลิป ระบบจะอ่านยอด</div>
-  </div>
-</div>
+        <div style={{ background: '#fff', borderRadius: 18, padding: 18, display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 6px 24px rgba(0,0,0,0.08)' }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,.06)' }}>
+            <Image src="/logo.png" alt="Nailties logo" width={44} height={44} priority style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          </div>
+          <div>
+            <div style={{ color: DEEP_PINK, fontWeight: 900, fontSize: 22 }}>อัปโหลดสลิปเพื่อยืนยันการชำระ</div>
+            <div style={{ color: '#666' }}>สแกน QR โอน → อัปโหลดสลิป ระบบจะอ่านยอด</div>
+          </div>
+        </div>
 
         {/* QR */}
         <Card title="สแกนเพื่อชำระ (PromptPay)">
           <div style={{ display: 'grid', justifyItems: 'center', gap: 12 }}>
-            <img
-              src={qrUrl}
-              alt="PromptPay QR"
-              style={{ width: 260, height: 260, borderRadius: 16, objectFit: 'contain', border: `1px solid ${PINK}` }}
-            />
+            <img src={qrUrl} alt="PromptPay QR" style={{ width: 260, height: 260, borderRadius: 16, objectFit: 'contain', border: `1px solid ${PINK}` }} />
             <div style={{ textAlign: 'center', color: '#666' }}>
               โอนยอด <b>{totalExpected.toFixed(2)}</b> บาท (ภายใน {Math.floor(remainSec/60)} นาที {String(remainSec%60).padStart(2,'0')} วินาที)
             </div>
@@ -423,7 +506,7 @@ export default function OcrPage() {
           <div style={{ display: 'grid', gap: 6 }}>
             {customerName && <div><b>ชื่อ: </b>{customerName}</div>}
             {serviceType  && <div><b>บริการ: </b>{serviceType}</div>}
-            {barber       && <div><b>ช่าง: </b>{barber}</div>}
+            {(barber || barberId) && <div><b>ช่าง: </b>{barber || barberId}</div>}
             {(date || time) && <div><b>เวลา: </b>{time} {date}</div>}
             <div><b>ระยะเวลา: </b>{hoursNum} ชั่วโมง</div>
             <div><b>ยอดที่ต้องชำระ: </b><span style={{ color: DEEP_PINK, fontWeight: 900 }}>{totalExpected.toFixed(2)} บาท</span></div>
@@ -451,7 +534,6 @@ export default function OcrPage() {
                 ) : (
                   <>
                     {error && <div style={{ color: '#b00020', background: '#ffeaea', padding: 8, borderRadius: 8 }}>{error}</div>}
-
                     {result && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                         <span
@@ -473,19 +555,19 @@ export default function OcrPage() {
               </div>
             )}
 
-            {/* ปุ่มยืนยัน/ลองใหม่/ยกเลิก */}
+            {/* ปุ่มยืนยัน/ยกเลิก */}
             <div style={{ display: 'flex', gap: 10, marginTop: 4, flexWrap: 'wrap' }}>
               <button
                 onClick={handleConfirm}
-                disabled={!isOk || running || !fileUrl || saving}
+                disabled={!isOk || running || !fileUrl || saving || !myHoldAcquired}
                 style={{
-                  background: isOk && !saving ? PINK : '#ddd',
+                  background: isOk && !saving && myHoldAcquired ? PINK : '#ddd',
                   color: '#fff',
                   border: 'none',
                   borderRadius: 10,
                   padding: '10px 14px',
                   fontWeight: 800,
-                  cursor: isOk && !saving ? 'pointer' : 'not-allowed',
+                  cursor: isOk && !saving && myHoldAcquired ? 'pointer' : 'not-allowed',
                   minWidth: 200,
                   opacity: saving ? 0.85 : 1
                 }}
@@ -493,9 +575,6 @@ export default function OcrPage() {
                 {saving ? 'กำลังบันทึก…' : 'ยืนยันการชำระเงิน'}
               </button>
 
-            
-
-              {/* ✅ ปุ่มยกเลิก -> ไปหน้า /booking */}
               <button
                 onClick={handleCancel}
                 type="button"
@@ -509,33 +588,27 @@ export default function OcrPage() {
                   cursor: 'pointer'
                 }}
               >
-                ยกเลิก 
+                ยกเลิก
               </button>
             </div>
           </div>
         </Card>
-
+        
         <Card title="หมายเหตุ">
           <ul style={{ margin: 0, paddingLeft: 18, color: '#555' }}>
             <li>โอนผิดหรือโอนเกินไม่รับผิดชอบทุกรณี</li>
-            <li>รบกวนมาให้ตรงเวลาหากมาสายเกิน 15 นาที ถือว่าลูกค้าได้ทำการยกเลิกการจองคิว</li>
+            <li>หากมาสายเกิน 30 นาที ถือว่าลูกค้าได้ทำการยกเลิกการจองคิว ทางร้านขอสงวนสิทธิ์ยึดมัดจำทันที</li>
             <li>การทำเล็บอาจเสร็จเร็วหรือช้ากว่าที่เวลากำหนดขึ้นอยู่กับลายหรือเหตุผลอื่นๆ</li>
           </ul>
         </Card>
       </div>
+      
 
-      {/* ⏳ Overlay ตอนบันทึก */}
+      {/* ⏳ Overlay */}
       {saving && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(255,255,255,.65)',
-          display: 'grid', placeItems: 'center', zIndex: 50, backdropFilter: 'blur(2px)'
-        }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(255,255,255,.65)', display: 'grid', placeItems: 'center', zIndex: 50, backdropFilter: 'blur(2px)' }}>
           <div style={{ display: 'grid', gap: 10, justifyItems: 'center' }}>
-            <div style={{
-              width: 56, height: 56, borderRadius: '50%',
-              border: '6px solid #fce1f0', borderTopColor: '#c2185b',
-              animation: 'spin 1s linear infinite'
-            }} />
+            <div style={{ width: 56, height: 56, borderRadius: '50%', border: '6px solid #fce1f0', borderTopColor: '#c2185b', animation: 'spin 1s linear infinite' }} />
             <div style={{ fontWeight: 900, color: DEEP_PINK }}>กำลังบันทึก…</div>
           </div>
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -544,43 +617,18 @@ export default function OcrPage() {
 
       {/* ⚠️ Popup: คิวถูกปิดไปแล้ว */}
       {showBookedPopup && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,.25)', zIndex: 60,
-          display: 'grid', placeItems: 'center'
-        }}>
-          <div style={{
-            width: 340, background: '#fff', borderRadius: 18, padding: 22,
-            display: 'grid', gap: 12, justifyItems: 'center',
-            boxShadow: '0 20px 60px rgba(173,20,87,.25)'
-          }}>
-            <div style={{
-              width: 78, height: 78, borderRadius: '50%',
-              background: '#FFE3E6', display: 'grid', placeItems: 'center'
-            }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.25)', zIndex: 60, display: 'grid', placeItems: 'center' }}>
+          <div style={{ width: 340, background: '#fff', borderRadius: 18, padding: 22, display: 'grid', gap: 12, justifyItems: 'center', boxShadow: '0 20px 60px rgba(173,20,87,.25)' }}>
+            <div style={{ width: 78, height: 78, borderRadius: '50%', background: '#FFE3E6', display: 'grid', placeItems: 'center' }}>
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
                 <path d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke="#AD1457" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
             </div>
-            <div style={{ fontWeight: 900, color: DEEP_PINK, fontSize: 18 }}>คิวนี้ถูกปิดไปแล้ว</div>
-            <div style={{ color: '#666', textAlign: 'center' }}>กรุณาเลือกเวลาใหม่หรือติดต่อร้าน</div>
+            <div style={{ fontWeight: 900, color: DEEP_PINK, fontSize: 18 }}>คิวนี้ถูกปิดชั่วคราว</div>
+            <div style={{ color: '#666', textAlign: 'center' }}>มีผู้อื่นกำลังทำรายการเวลานี้ กรุณาเลือกเวลาใหม่ค่ะ</div>
             <div style={{ display: 'grid', gap: 8, width: '100%' }}>
-              <button
-                onClick={() => { setShowBookedPopup(false); router.push('/booking'); }}
-                style={{
-                  background: '#fff', border: '2px solid #ef9a9a', color: '#c62828',
-                  borderRadius: 10, padding: '10px 14px', fontWeight: 800
-                }}
-              >
+              <button onClick={() => router.replace('/booking')} style={{ background: '#fff', border: '2px solid #ef9a9a', color: '#c62828', borderRadius: 10, padding: '10px 14px', fontWeight: 800 }}>
                 ไปจองใหม่
-              </button>
-              <button
-                onClick={() => { setShowBookedPopup(false); router.push('/'); }}
-                style={{
-                  background: DEEP_PINK, color: '#fff', border: 'none',
-                  borderRadius: 10, padding: '10px 14px', fontWeight: 800
-                }}
-              >
-                กลับหน้าแรก
               </button>
             </div>
           </div>
@@ -589,14 +637,8 @@ export default function OcrPage() {
 
       {/* ✅ ป็อปอัป “สรุปการจอง” */}
       {showSummary && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,.25)', zIndex: 70,
-          display: 'grid', placeItems: 'center', padding: 16
-        }}>
-          <div style={{
-            width: 'min(560px, 96vw)', background: '#fff', borderRadius: 18, padding: 22,
-            display: 'grid', gap: 14, boxShadow: '0 20px 60px rgba(173,20,87,.25)'
-          }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.25)', zIndex: 70, display: 'grid', placeItems: 'center', padding: 16 }}>
+          <div style={{ width: 'min(560px, 96vw)', background: '#fff', borderRadius: 18, padding: 22, display: 'grid', gap: 14, boxShadow: '0 20px 60px rgba(173,20,87,.25)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ width: 54, height: 54, borderRadius: 999, background: PINK, display: 'grid', placeItems: 'center' }}>
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
@@ -614,56 +656,13 @@ export default function OcrPage() {
             </div>
 
             <div style={{ display: 'grid', gap: 10 }}>
-              <button
-                onClick={downloadCardPng}
-                style={{
-                  background: 'linear-gradient(135deg,#ff7ac8,#b07cff)',
-                  color: '#fff', border: 'none', borderRadius: 10,
-                  padding: '10px 14px', fontWeight: 800, cursor: 'pointer'
-                }}
-              >
+              <button onClick={downloadCardPng} style={{ background: 'linear-gradient(135deg,#ff7ac8,#b07cff)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 14px', fontWeight: 800, cursor: 'pointer' }}>
                 ดาวน์โหลดบัตรคิว (PNG)
               </button>
-
-              <a
-                href={icsHref}
-                download={`nailties-${refCode}.ics`}
-                style={{
-                  background: '#fff',
-                  border: `2px solid ${PINK}`,
-                  color: DEEP_PINK,
-                  borderRadius: 10,
-                  padding: '10px 14px',
-                  fontWeight: 800,
-                  textAlign: 'center',
-                  textDecoration: 'none'
-                }}
-              >
-                เพิ่มลงปฏิทิน (.ics)
-              </a>
-
-              <button
-                onClick={copySummary}
-                style={{
-                  background: '#fff',
-                  border: `2px solid ${PINK}`,
-                  color: DEEP_PINK,
-                  borderRadius: 10,
-                  padding: '10px 14px',
-                  fontWeight: 800,
-                  cursor: 'pointer'
-                }}
-              >
+              <button onClick={copySummary} style={{ background: '#fff', border: `2px solid ${PINK}`, color: DEEP_PINK, borderRadius: 10, padding: '10px 14px', fontWeight: 800, cursor: 'pointer' }}>
                 คัดลอกข้อความสรุป
               </button>
-
-              <button
-                onClick={() => router.push('/')}
-                style={{
-                  marginTop: 4, background: DEEP_PINK, color: '#fff', border: 'none',
-                  borderRadius: 10, padding: '10px 14px', fontWeight: 800
-                }}
-              >
+              <button onClick={() => router.push('/')} style={{ marginTop: 4, background: DEEP_PINK, color: '#fff', border: 'none', borderRadius: 10, padding: '10px 14px', fontWeight: 800 }}>
                 กลับหน้าแรก
               </button>
             </div>

@@ -11,7 +11,6 @@ import { database, ref, onValue, push, set } from "../lib/firebase";
 /* ================== CONFIG & STYLES ================== */
 const LOGO_SIZE = 80;
 
-// LINE ID ของคุณ (หรือใช้ ENV)
 const LINE_ADD_FRIEND_URL =
   process.env.NEXT_PUBLIC_LINE_ADD_FRIEND_URL ??
   "https://line.me/R/ti/p/@978tofxe";
@@ -59,7 +58,14 @@ const cardstyle: React.CSSProperties = {
 };
 
 /* ================== TYPES ================== */
-type Review = { name: string; text: string; createdAt: number };
+type AdminReply = { text: string; updatedAt?: number };
+type Review = {
+  name: string;
+  text: string;
+  createdAt: number;
+  rating?: number;          // 1..5 (ถ้าไม่มี จะถือเป็น 5)
+  adminReply?: AdminReply;  // { text, updatedAt? }
+};
 
 type Promo = {
   title: string;
@@ -84,7 +90,7 @@ const services = [
 /* ================== UTILS ================== */
 const toBool = (v: any) => v === true || v === "true" || v === 1 || v === "1";
 
-/* ============== CTA Button (Hover ด้วย state, ไม่ใช้ <style jsx>) ============== */
+/* ============== CTA Button (Hover ด้วย state) ============== */
 function CtaLink({ href, children }: { href: string; children: React.ReactNode }) {
   const [hovered, setHovered] = useState(false);
 
@@ -107,6 +113,27 @@ function CtaLink({ href, children }: { href: string; children: React.ReactNode }
     >
       {children}
     </Link>
+  );
+}
+
+/* ============== Stars ============== */
+function Stars({ value = 5 }: { value?: number }) {
+  const v = Math.max(1, Math.min(5, Math.round(value)));
+  return (
+    <div aria-label={`${v} stars`} style={{ display: "inline-flex", gap: 2 }}>
+      {Array.from({ length: 5 }).map((_, i) => (
+        <svg
+          key={i}
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill={i < v ? "#f59e0b" : "#e5e7eb"}
+          aria-hidden="true"
+        >
+          <path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+        </svg>
+      ))}
+    </div>
   );
 }
 
@@ -137,7 +164,15 @@ function ReviewsSlider({ reviews }: { reviews: Review[] }) {
         >
           {Array.from({ length: pages }).map((_, i) => (
             <div key={i} style={{ flex: "0 0 100%" }}>
-              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 12 }}>
+              <ul
+                style={{
+                  listStyle: "none",
+                  padding: 0,
+                  margin: 0,
+                  display: "grid",
+                  gap: 12,
+                }}
+              >
                 {reviews.slice(i * perPage, i * perPage + perPage).map((rv, idx) => (
                   <li
                     key={`${i}-${idx}-${rv.name}`}
@@ -146,10 +181,72 @@ function ReviewsSlider({ reviews }: { reviews: Review[] }) {
                       border: "1px solid #ffd6ec",
                       borderRadius: 12,
                       padding: "12px 14px",
+                      overflow: "hidden",
                     }}
                   >
-                    <div style={{ fontWeight: 800, marginBottom: 4, color: "#c2185b" }}>{rv.name}</div>
-                    <div style={{ color: "#475569", whiteSpace: "pre-wrap" }}>{rv.text}</div>
+                  {/* header: name + stars (inline) */}
+<div
+  style={{
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 4,
+    minWidth: 0, // กันล้น
+  }}
+>
+  <div
+    style={{
+      fontWeight: 800,
+      color: "#c2185b",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
+      minWidth: 0,
+      flex: "0 1 auto",
+    }}
+    title={rv.name}
+  >
+    {rv.name}
+  </div>
+  <Stars value={rv.rating ?? 5} />
+</div>
+
+
+                    {/* customer text */}
+                    <div
+                      style={{
+                        color: "#475569",
+                        whiteSpace: "pre-wrap",
+                        overflowWrap: "anywhere",
+                        wordBreak: "break-word",
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {rv.text}
+                    </div>
+
+                    {/* admin reply */}
+                    {rv.adminReply?.text ? (
+                      <div
+                        style={{
+                          marginTop: 10,
+                          padding: "10px 12px",
+                          borderRadius: 10,
+                          border: "1px dashed #ffd6ec",
+                          background: "#fff0f6",
+                          color: "#334155",
+                          overflowWrap: "anywhere",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        <div style={{ fontWeight: 900, color: "#AD1457", marginBottom: 4 }}>
+                          คำตอบจากแอดมิน
+                        </div>
+                        <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.45 }}>
+                          {rv.adminReply.text}
+                        </div>
+                      </div>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -224,7 +321,6 @@ function PromoMarquee({ promo }: { promo: Promo }) {
         </div>
       </div>
 
-      {/* ใช้ styled-jsx ที่ใช้งานได้แล้วในไฟล์นี้ */}
       <style jsx global>{`
         .promo-marquee {
           overflow: hidden;
@@ -257,12 +353,8 @@ function PromoMarquee({ promo }: { promo: Promo }) {
           white-space: nowrap;
         }
         @keyframes promo-marquee-slide {
-          from {
-            transform: translate3d(0, 0, 0);
-          }
-          to {
-            transform: translate3d(-50%, 0, 0);
-          }
+          from { transform: translate3d(0, 0, 0); }
+          to   { transform: translate3d(-50%, 0, 0); }
         }
       `}</style>
     </section>
@@ -362,7 +454,7 @@ function FloatingLineButton({ href }: { href: string }) {
     <>
       {showHint && (
         <div className="floating-line-hint" role="status" aria-live="polite">
-          จองผ่าน LINE เพื่อรับการแจ้งเตือน
+          จองผ่าน LINE เพื่อรับการแจ้งเตือนและสะสมแต้ม
           <button className="hint-close" aria-label="ปิด" onClick={() => setShowHint(false)}>
             ×
           </button>
@@ -440,8 +532,16 @@ export default function NailHomePage() {
   useEffect(() => {
     const unsub = onValue(ref(database, "reviews"), (snap) => {
       const val = snap.val() || {};
-      const list: Review[] = Object.values(val);
-      list.sort((a, b) => (b as Review).createdAt - (a as Review).createdAt);
+      const list: Review[] = Object.values(val).map((r: any) => ({
+        name: r?.name ?? "-",
+        text: r?.text ?? "",
+        createdAt: Number(r?.createdAt) || 0,
+        rating: typeof r?.rating === "number" ? r.rating : undefined, // แสดงถ้ามี
+        adminReply: r?.adminReply?.text
+          ? { text: String(r.adminReply.text), updatedAt: Number(r.adminReply?.updatedAt) || undefined }
+          : undefined,
+      }));
+      list.sort((a, b) => b.createdAt - a.createdAt);
       setReviews(list);
     });
     return () => unsub();
@@ -459,6 +559,7 @@ export default function NailHomePage() {
     try {
       setSending(true);
       const newRef = push(ref(database, "reviews"));
+      // ถ้าไม่ได้ให้เลือกดาวที่หน้าเว็บนี้ จะไม่ส่ง rating (ระบบจะถือเป็น 5 ตอนแสดงผล)
       await set(newRef, { name, text, createdAt: Date.now() });
       setRvName("");
       setRvText("");
@@ -542,12 +643,13 @@ export default function NailHomePage() {
 
           <nav style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
             <a href="#" style={navBtn}>Home</a>
+            <Link href="/availability" style={navBtn}>queue</Link>
             <Link href="/login" style={navBtn}>Login</Link>
           </nav>
         </div>
       </header>
 
-      {/* ===== HERO (เพิ่มปุ่มจองคิวข้างข้อความ) ===== */}
+      {/* ===== HERO ===== */}
       <section className="hero">
         <div className="hero-visual">
           <div style={{ ...cardstyle, padding: 0, overflow: "hidden" }}>
@@ -571,12 +673,10 @@ export default function NailHomePage() {
             เลือกโทนสี ลาย และรูปทรงได้ตามต้องการ — วัสดุพรีเมียม มือเบา ใส่ใจรายละเอียด พร้อมบรรยากาศชิลล์ ๆ ให้คุณผ่อนคลาย
           </p>
 
-          {/* ปุ่มจองคิว — ใหญ่ + hover ด้วย state */}
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 16, flexWrap: "wrap" }}>
             <CtaLink href="/booking">จองคิว</CtaLink>
           </div>
 
-          {/* badges */}
           <div style={{ display: "flex", gap: 10, marginTop: 14, color: "#475569", fontWeight: 600, flexWrap: "wrap" }}>
             <span style={badge}>อุปกรณ์สะอาด</span>
             <span style={badge}>สีติดทน</span>

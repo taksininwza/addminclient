@@ -7,13 +7,13 @@ const app = getApps().length
       credential: cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        // แทนที่ \n ใน ENV ให้เป็น newline จริง
         privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
       }),
-      // ⭐️ สำคัญ: ใส่ RTDB URL ของโปรเจกต์คุณ
       databaseURL: process.env.FIREBASE_DATABASE_URL,
     });
 
 export const rtdb = getDatabase(app);
-// ใช้ timestamp ของเซิร์ฟเวอร์ RTDB
+export const db = rtdb;  // ✅ alias ให้ชื่อ db ใช้งานได้
 export const serverTimestamp = ServerValue.TIMESTAMP;
+
+export default app; 

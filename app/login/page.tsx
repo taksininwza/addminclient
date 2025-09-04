@@ -17,7 +17,7 @@ const LoginPage: React.FC = () => {
     if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
       const res = await fetch("/api/login", { method: "POST" });
       if (res.ok) {
-        router.push("/home");
+        router.push("/admin");
       } else {
         setError("ไม่สามารถเข้าสู่ระบบได้");
       }
@@ -27,8 +27,8 @@ const LoginPage: React.FC = () => {
   };
 
   const handleLineLogin = () => {
-    // พาไปหน้า LIFF เพื่อทำ LINE Login แล้วกลับมาที่ /home
-    router.push("/liff?next=/home");
+    // พาไปหน้า LIFF เพื่อทำ LINE Login แล้วกลับมาที่ /admin
+    router.push("/liff?next=/admin");
   };
 
   return (

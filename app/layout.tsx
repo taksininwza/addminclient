@@ -1,11 +1,20 @@
-// app/layout.tsx
+
 import React from "react";
 import "./globals.css"; // ถ้ามี global style
 
 export const metadata = {
-  title: "My App",
-  description: "My Next.js Application",
+  title: {
+    default: 'Nailties',
+    template: '%s | Nailties',
+  },
+  applicationName: 'Nailties',
+  
+  icons: {
+    icon: '/favicon.ico',
+    apple: '/icons/icon-192.png',
+  },
 };
+
 
 export default function RootLayout({
   children,

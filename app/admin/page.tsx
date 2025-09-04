@@ -1,14 +1,14 @@
-// app/home/page.tsx
+// app/admin/page.tsx
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import dayjs from "dayjs";
-import Link from "next/link";
 import { database, ref, onValue, set, remove, push } from "../../lib/firebase";
 import DashboardPage from "./Dashboard";
 import CalendarPage from "./Calendar";
-import BarbersPage from "./Barbers";
-import AdminHomeContent from "./AdminHomeContent"; // ✅ เพิ่ม
+import BarbersPage, { UnavailableBlock } from "./Barbers";
+import AdminHomeContent from "./AdminHomeContent";
+import dynamic from "next/dynamic";
 
 interface Reservation {
   appointment_date: string;
@@ -18,17 +18,25 @@ interface Reservation {
   phone?: string;
   note?: string;
 }
-interface Barber { name: string }
+interface Barber {
+  name: string;
+}
 
-const HomePage: React.FC = () => {
-  const [page, setPage] = useState<"dashboard" | "calendar" | "barbers" | "homeContent">("dashboard"); // ✅ เพิ่ม "homeContent"
+const AdminHome: React.FC = () => {
+  const [page, setPage] = useState<"dashboard" | "calendar" | "barbers" | "homeContent">("dashboard");
+
   const [reservations, setReservations] = useState<Record<string, Reservation>>({});
   const [barbers, setBarbers] = useState<Record<string, Barber>>({});
+
+  // === NEW: unavailability per barber ===
+  // โครงสร้างใน RTDB: /unavailability/{barberId}/{blockId} = { date, start, end, note }
+  const [unavailability, setUnavailability] = useState<Record<string, UnavailableBlock[]>>({});
+
+  // ===== summaries for dashboard =====
   const [dailySummary, setDailySummary] = useState<any[]>([]);
   const [monthlySummary, setMonthlySummary] = useState<any[]>([]);
   const [barberSummary, setBarberSummary] = useState<any[]>([]);
 
-  // ====== styles (responsive container) ======
   const container: React.CSSProperties = {
     width: "100%",
     maxWidth: "min(1200px, 92vw)",
@@ -48,18 +56,38 @@ const HomePage: React.FC = () => {
     display: "inline-block",
   });
 
-  // fetch data
+  // ===== subscribe base data =====
   useEffect(() => {
-    const unsubRes = onValue(ref(database, "reservations"), (s) =>
-      setReservations(s.val() || {})
-    );
-    const unsubBar = onValue(ref(database, "barbers"), (s) =>
-      setBarbers(s.val() || {})
-    );
-    return () => { unsubRes(); unsubBar(); };
+    const unsubRes = onValue(ref(database, "reservations"), (s) => setReservations(s.val() || {}));
+    const unsubBar = onValue(ref(database, "barbers"), (s) => setBarbers(s.val() || {}));
+
+    // ⬇️ subscribe unavailability ของทั้งระบบ
+    const unsubUnavail = onValue(ref(database, "unavailability"), (snap) => {
+      const raw = (snap.val() || {}) as Record<
+        string,
+        Record<string, { date: string; start: string; end: string; note?: string }>
+      >;
+      const map: Record<string, UnavailableBlock[]> = {};
+      Object.entries(raw).forEach(([barberId, blocks]) => {
+        map[barberId] = Object.entries(blocks || {}).map(([id, v]) => ({
+          id,
+          date: v.date,
+          start: v.start,
+          end: v.end,
+          note: v.note,
+        }));
+      });
+      setUnavailability(map);
+    });
+
+    return () => {
+      unsubRes();
+      unsubBar();
+      unsubUnavail();
+    };
   }, []);
 
-  // summaries สำหรับกราฟใน Dashboard
+  // ===== summaries =====
   useEffect(() => {
     const id2name: Record<string, string> = {};
     Object.entries(barbers).forEach(([id, v]) => (id2name[id] = v.name));
@@ -80,21 +108,15 @@ const HomePage: React.FC = () => {
       }
     });
 
-    setDailySummary(Object.entries(daily).map(([date, count]) => ({
-      date: dayjs(date).format("D MMM"), count,
-    })));
-    setMonthlySummary(Object.entries(monthly).map(([month, count]) => ({
-      month: dayjs(month).format("MMM YYYY"), count,
-    })));
-    setBarberSummary(Object.entries(barberCount).map(([name, count]) => ({
-      name, count,
-    })));
+    setDailySummary(Object.entries(daily).map(([date, count]) => ({ date: dayjs(date).format("D MMM"), count })));
+    setMonthlySummary(Object.entries(monthly).map(([month, count]) => ({ month: dayjs(month).format("MMM YYYY"), count })));
+    setBarberSummary(Object.entries(barberCount).map(([name, count]) => ({ name, count })));
   }, [reservations, barbers]);
 
   const totalReservations = Object.values(reservations).length;
   const totalBarbers = Object.keys(barbers).length;
 
-  // add / delete barber
+  // ===== CRUD: barbers =====
   const addBarber = async (name: string) => {
     const n = name.trim();
     if (!n) return;
@@ -104,6 +126,23 @@ const HomePage: React.FC = () => {
   const deleteBarber = async (id: string) => {
     if (!window.confirm("ยืนยันการลบช่างนี้?")) return;
     await remove(ref(database, `barbers/${id}`));
+    // ลบ unavailability ของช่างคนนี้ด้วย (ถ้ามี)
+    await remove(ref(database, `unavailability/${id}`));
+  };
+
+  // ===== NEW: CRUD unavailability (ส่งลง BarbersPage) =====
+  const addUnavailable = async (barberId: string, block: Omit<UnavailableBlock, "id">) => {
+    const newRef = push(ref(database, `unavailability/${barberId}`));
+    await set(newRef, {
+      date: block.date,
+      start: block.start,
+      end: block.end,
+      note: block.note || "",
+    });
+  };
+
+  const deleteUnavailable = async (barberId: string, blockId: string) => {
+    await remove(ref(database, `unavailability/${barberId}/${blockId}`));
   };
 
   const handleLogout = async () => {
@@ -123,7 +162,7 @@ const HomePage: React.FC = () => {
         overflowX: "hidden",
       }}
     >
-      {/* Nav */}
+      {/* Top Nav */}
       <header
         style={{
           position: "sticky",
@@ -146,11 +185,8 @@ const HomePage: React.FC = () => {
             justifyContent: "space-between",
           }}
         >
-          <div style={{ fontWeight: 800, fontSize: 20, letterSpacing: .2 }}>
-             Admin
-          </div>
+          <div style={{ fontWeight: 800, fontSize: 20, letterSpacing: 0.2 }}>Admin</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-           
             <button onClick={() => setPage("dashboard")} style={tabStyle(page === "dashboard")}>
               Dashboard
             </button>
@@ -160,7 +196,6 @@ const HomePage: React.FC = () => {
             <button onClick={() => setPage("barbers")} style={tabStyle(page === "barbers")}>
               Barbers
             </button>
-            {/* ✅ ปุ่มใหม่: จัดการหน้า Home */}
             <button onClick={() => setPage("homeContent")} style={tabStyle(page === "homeContent")}>
               Edit Home
             </button>
@@ -197,9 +232,16 @@ const HomePage: React.FC = () => {
           ) : page === "calendar" ? (
             <CalendarPage reservations={reservations} barbers={barbers} />
           ) : page === "barbers" ? (
-            <BarbersPage barbers={barbers} addBarber={addBarber} deleteBarber={deleteBarber} />
+            <BarbersPage
+              barbers={barbers}
+              addBarber={addBarber}
+              deleteBarber={deleteBarber}
+              unavailability={unavailability}
+              addUnavailable={addUnavailable}
+              deleteUnavailable={deleteUnavailable}
+            />
           ) : (
-            <AdminHomeContent /> // ✅ หน้าจัดการโปรโมชั่น/รีวิว
+            <AdminHomeContent />
           )}
         </div>
       </main>
@@ -207,4 +249,4 @@ const HomePage: React.FC = () => {
   );
 };
 
-export default HomePage;
+export default dynamic(() => Promise.resolve(AdminHome), { ssr: false });

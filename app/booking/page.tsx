@@ -9,6 +9,13 @@ import { useRouter } from "next/navigation";
 import { database, ref, onValue } from "../../lib/firebase";
 import { computeUniqueAmount } from '../../lib/uniqueAmount';
 
+// ✅ ใช้ helper สำหรับคำนวณ slot และเช็คบล็อกปิดรับ
+import {
+  computeAvailableStartTimes,
+  type UnavailMap,
+  isBlockedAt,
+} from '@/lib/availability';
+
 type Barber = { name: string };
 type Reservation = {
   appointment_date: string;
@@ -29,6 +36,9 @@ type Payment = {
   status?: string;
   matched?: boolean;
 };
+
+// ===== Soft-hold type (มาจากหน้า OCR) =====
+type HoldNode = { expires_at_ms?: number; owner?: string };
 
 const DEPOSIT_THB = Number(process.env.NEXT_PUBLIC_DEPOSIT_AMOUNT || 100);
 
@@ -86,7 +96,6 @@ function stripNonDigits(s: string) {
   return toArabicDigits(s).replace(/\D/g, '');
 }
 function stripDigitsFromName(s: string) {
-  // ลบทั้งเลขอารบิกและเลขไทย
   return s.replace(/[0-9๐-๙]/g, '');
 }
 
@@ -107,6 +116,13 @@ export default function BookingPage() {
   const [reservations, setReservations] = useState<Record<string, Reservation>>({});
   const [payments, setPayments] = useState<Record<string, Payment>>({});
 
+  // ⭐ Soft-holds (อ่านจาก RTDB เพื่อตัดเวลาออกชั่วคราว)
+  // โครงสร้างใน RTDB: slot_holds/{date}/{barberId}/{HH:mm} = { expires_at_ms, owner }
+  const [holds, setHolds] = useState<Record<string, Record<string, Record<string, HoldNode>>>>({});
+
+  // ✅ ช่วง “ปิดรับคิว” ต่อช่าง
+  const [unavailability, setUnavailability] = useState<UnavailMap>({});
+
   const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -125,12 +141,55 @@ export default function BookingPage() {
     const unsubPays = onValue(ref(database, "payments"), (s) => {
       setPayments(s.val() || {});
     });
+
     return () => {
       unsubBarbers();
       unsubRes();
       unsubPays();
     };
   }, [selectedBarberId]);
+
+  // ⭐ subscribe soft-holds เฉพาะของวันที่เลือก
+  useEffect(() => {
+    if (!dateStr) return;
+    const off = onValue(ref(database, `slot_holds/${dateStr}`), (snap) => {
+      setHolds({ [dateStr]: (snap.val() || {}) });
+    });
+    return () => off();
+  }, [dateStr]);
+
+  // ✅ subscribe ช่วงไม่รับคิวทั้งหมด
+  useEffect(() => {
+    const off = onValue(ref(database, 'unavailability'), (snap) => {
+      const raw = snap.val() || {};
+      const normalized: UnavailMap = {};
+
+      Object.entries<any>(raw).forEach(([barberId, blocks]) => {
+        if (Array.isArray(blocks)) {
+          normalized[barberId] = blocks.filter(Boolean);
+        } else if (blocks && typeof blocks === 'object') {
+          normalized[barberId] = Object.entries(blocks).map(([id, v]: any) => ({
+            id,
+            date: v.date,
+            start: v.start,
+            end: v.end,
+            note: v.note,
+          }));
+        }
+      });
+
+      setUnavailability(normalized);
+    });
+    return () => off();
+  }, []);
+
+  // helper: เช็คว่า HH:mm ถูก hold อยู่ไหม
+  function isHeld(barberId: string | undefined, hhmm: string): boolean {
+    if (!barberId) return false;
+    const node: HoldNode | undefined = holds?.[dateStr]?.[barberId]?.[hhmm];
+    if (!node || !node.expires_at_ms) return false;
+    return Number(node.expires_at_ms) > Date.now();
+  }
 
   // สร้างช่วงเวลา 10–20 (เว้นพักเที่ยง) และตัดเวลาที่ผ่านมาใน "วันนี้"
   const timeSlots = useMemo(() => {
@@ -192,22 +251,26 @@ export default function BookingPage() {
     return set;
   }, [reservations, payments, dateStr, selectedBarberId, barberName]);
 
-  // ⭐ คำนวณ "เวลาเริ่มต้น" ที่จองได้ โดยต้องมี slot ว่างติดกันตามจำนวนชั่วโมงที่เลือก
+  // ⭐ คำนวณ "เวลาเริ่มต้น" ที่จองได้ — เคารพ holds + reserved + ช่วงปิดรับ
   const availableStartTimes = useMemo(() => {
-    // ต้องมีอย่างน้อย 1 ชม.
-    const h = Math.max(1, durationHours);
-
-    return timeSlots.filter((start, idx) => {
-      for (let k = 0; k < h; k++) {
-        const slot = timeSlots[idx + k];
-        if (!slot) return false;
-        const expected = dayjs(`${dateStr} ${start}`).add(k * SLOT_MIN, "minute").format("HH:mm");
-        if (slot !== expected) return false;            // ต้องต่อกันจริง ๆ ทีละ 60 นาที
-        if (reservedTimes.has(slot)) return false;      // ห้ามชนกับที่ถูกจอง
-      }
-      return true;
+    return computeAvailableStartTimes({
+      timeSlots,
+      hours: Math.max(1, durationHours),
+      dateStr,
+      barberId: selectedBarberId,
+      reservedTimes,
+      holds,
+      unavailability, // ✅ กันช่วงปิดรับด้วย
     });
-  }, [timeSlots, durationHours, reservedTimes, dateStr]);
+  }, [
+    timeSlots,
+    durationHours,
+    dateStr,
+    selectedBarberId,
+    reservedTimes,
+    holds,
+    unavailability,
+  ]);
 
   // สำหรับแสดงช่วงเวลา start–end
   const renderRange = (start: string) => {
@@ -217,14 +280,11 @@ export default function BookingPage() {
 
   // ====== Key filters ======
   const onNameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    // บล็อกตัวเลข (ทั้ง 0-9 และ ๐-๙)
     if (/[0-9๐-๙]/.test(e.key)) e.preventDefault();
   };
   const onPhoneKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    // อนุญาตปุ่มควบคุมพื้นฐาน
     const ok = ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'];
     if (ok.includes(e.key)) return;
-    // อนุญาตเฉพาะตัวเลข 0-9 (เลขไทยจะถูกแปลงใน onChange)
     if (!/^[0-9]$/.test(e.key)) e.preventDefault();
   };
 
@@ -249,7 +309,7 @@ export default function BookingPage() {
       dayjs(`${dateStr} ${chosenStart}`).add(k * SLOT_MIN, "minute").format("HH:mm")
     );
 
-    // กันชนซ้ำจาก reservations
+    // กันชนจาก reservations (ยืนยันแล้วจากฝั่งไลน์)
     const clashFromReservations = Object.values(reservations).some(
       (r) =>
         r.appointment_date === dateStr &&
@@ -257,7 +317,7 @@ export default function BookingPage() {
         selectedTimes.includes(r.appointment_time)
     );
 
-    // กันชนซ้ำจาก payments (ที่ยืนยันแล้ว)
+    // กันชนจาก payments (ที่ยืนยันแล้ว)
     const barberNm = barbers[selectedBarberId]?.name || '';
     const clashFromPayments = Object.values(payments).some((p) => {
       const isConfirmed = p?.status === 'confirmed' || p?.matched === true;
@@ -270,8 +330,17 @@ export default function BookingPage() {
       return !!(sameDate && sameBarber && p?.time && selectedTimes.includes(p.time));
     });
 
-    if (clashFromReservations || clashFromPayments) {
-      return setError("ช่วงเวลานี้ถูกปิดการจองแล้ว กรุณาเลือกเวลาอื่น");
+    // กันชนจาก soft-hold (มีคนกำลังกรอกหน้า OCR)
+    const clashFromHolds = selectedTimes.some((t) => isHeld(selectedBarberId, t));
+
+    // ✅ กันชนจากช่วงไม่รับคิว
+    const blocks = unavailability[selectedBarberId] || [];
+    const clashFromUnavailability = selectedTimes.some((t) =>
+      isBlockedAt(dateStr, t, blocks)
+    );
+
+    if (clashFromReservations || clashFromPayments || clashFromHolds || clashFromUnavailability) {
+      return setError("ช่วงเวลานี้มีผู้ทำรายการ/ปิดรับอยู่ กรุณาเลือกเวลาอื่นค่ะ");
     }
 
     // ---------- redirect ไปหน้า OCR ----------
@@ -293,7 +362,8 @@ export default function BookingPage() {
       date: dateStr,
       time: chosenStart,
       hours: String(durationHours),
-      barber: barberNameSel,
+      barber: barberNameSel,       // เพื่อโชว์
+      barberId: selectedBarberId,  // ✅ ส่ง id จริงไปหน้า OCR เพื่อทำ hold
       minutes: '15'
     });
 
@@ -337,9 +407,7 @@ export default function BookingPage() {
           </Link>
 
           <nav style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
-            <Link href="/booking" style={primaryBtn}>จองคิว</Link>
             <Link href="/" style={navBtn}>Home</Link>
-            <Link href="/login" style={navBtn}>Login</Link>
           </nav>
         </div>
       </header>
@@ -449,7 +517,6 @@ export default function BookingPage() {
                 onKeyDown={onNameKeyDown}
                 onBlur={(e) => setCustomerName(stripDigitsFromName(e.target.value.trim()))}
                 placeholder="ชื่อของคุณ"
-                // ช่วย browser validation (กันเลขอารบิก)
                 pattern="[^0-9]+"
                 style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 10, border: "1px solid #ffd6ec", background: "#fff" }}
               />
