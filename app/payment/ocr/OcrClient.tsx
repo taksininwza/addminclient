@@ -4,8 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Tesseract from 'tesseract.js';
 import Image from 'next/image';
-
-// ❌ ห้าม export dynamic/revalidate/fetchCache ในไฟล์ client
+import QRCode from 'qrcode';
 
 // RTDB (client)
 import { database, ref, onValue, remove } from '@/lib/firebase';
@@ -15,12 +14,11 @@ const PINK = '#F48FB1';
 const DEEP_PINK = '#AD1457';
 const BG = '#FFF7FB';
 
-const API_BASE = '/api';
-const FETCH_URL = `${API_BASE}/payment/confirm`;
 const UNIT_PER_HOUR = Number(process.env.NEXT_PUBLIC_DEPOSIT_AMOUNT || 100);
 
 // soft-hold
-const HOLD_PATH = (date: string, barberId: string, time: string) => `slot_holds/${date}/${barberId}/${time}`;
+const HOLD_PATH = (date: string, barberId: string, time: string) =>
+  `slot_holds/${date}/${barberId}/${time}`;
 const HOLD_KEEPALIVE_MS = 10_000;
 const HOLD_TTL_MS = 25_000;
 
@@ -48,13 +46,13 @@ export default function OcrClient() {
     return Number.isFinite(n) ? Number(n.toFixed(2)) : 0;
   }, [params]);
 
-  const refCode      = params.get('ref')     || 'NAIL-REF-XXXXXX';
-  const customerName = params.get('name')    || '';
-  const serviceType  = params.get('service') || '';
-  const date         = params.get('date')    || '';
-  const time         = params.get('time')    || '';
-  const hoursStr     = params.get('hours')   || '1';
-  const barber       = params.get('barber')  || '';
+  const refCode      = params.get('ref')      || 'NAIL-REF-XXXXXX';
+  const customerName = params.get('name')     || '';
+  const serviceType  = params.get('service')  || '';
+  const date         = params.get('date')     || '';   // yyyy-mm-dd
+  const time         = params.get('time')     || '';   // HH:mm
+  const hoursStr     = params.get('hours')    || '1';
+  const barber       = params.get('barber')   || '';
   const barberId     = params.get('barberId') || '';
   const minutes      = useMemo(() => parseInt(params.get('minutes') || '15', 10), [params]);
 
@@ -63,6 +61,7 @@ export default function OcrClient() {
     return Number.isFinite(h) && h > 0 ? Math.floor(h) : 1;
   }, [hoursStr]);
 
+  // unique .xx จาก ref
   const fracFromRef = useMemo(() => {
     let v = 0;
     for (const ch of refCode) v = (v * 31 + ch.charCodeAt(0)) % 100;
@@ -79,16 +78,39 @@ export default function OcrClient() {
     [hoursNum, uniqueFrac]
   );
 
+  // slotId
   const slotId = useMemo(() => {
-    const sanitize = (s: string) => s.trim().replace(/\s+/g, '-').replace(/[.#$/[\]]/g, '-').toUpperCase();
+    const sanitize = (s: string) =>
+      s.trim().replace(/\s+/g, '-').replace(/[.#$/[\]]/g, '-').toUpperCase();
     const tSafe = time.replace(':', '-');
     return `${sanitize(barber)}_${sanitize(date)}_${sanitize(tSafe)}`;
   }, [barber, date, time]);
 
-  const qrUrl = useMemo(() => {
-    const amt = Math.max(0, totalExpected);
-    return `${API_BASE}/payment/qr?amount=${encodeURIComponent(amt.toFixed(2))}&ref=${encodeURIComponent(refCode)}`;
-  }, [totalExpected, refCode]);
+  // ---------- PromptPay QR (สร้างฝั่ง client) ----------
+  const promptpayId = process.env.NEXT_PUBLIC_PROMPTPAY_ID || '';
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+
+  // payload แบบทั่วไป (รองรับแอประหว่างค่ายได้ดีพอ)
+  function buildPromptPayPayload(id: string, amount: number, ref: string) {
+    const amt = amount.toFixed(2);
+    return `promptpay://payment?amount=${encodeURIComponent(amt)}&pa=${encodeURIComponent(id)}&ref=${encodeURIComponent(ref)}`;
+  }
+
+  useEffect(() => {
+    (async () => {
+      if (!promptpayId || totalExpected <= 0) {
+        setQrDataUrl(null);
+        return;
+      }
+      const payload = buildPromptPayPayload(promptpayId, totalExpected, refCode);
+      const url = await QRCode.toDataURL(payload, {
+        width: 512,
+        errorCorrectionLevel: 'M',
+        margin: 2,
+      });
+      setQrDataUrl(url);
+    })().catch(() => setQrDataUrl(null));
+  }, [promptpayId, totalExpected, refCode]);
 
   // -------- OCR state --------
   const [fileUrl, setFileUrl] = useState<string | null>(null);
@@ -97,6 +119,7 @@ export default function OcrClient() {
   const [result, setResult] = useState<OCRResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // ปุ่มยืนยัน / overlay + popup
   const [saving, setSaving] = useState(false);
   const [showBookedPopup, setShowBookedPopup] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -120,7 +143,7 @@ export default function OcrClient() {
     return ref(database, HOLD_PATH(date, barberId, time));
   }, [date, time, barberId]);
 
-  // try acquire hold
+  // พยายามยึด hold
   useEffect(() => {
     if (!holdRef) return;
 
@@ -130,7 +153,7 @@ export default function OcrClient() {
       const now = Date.now();
       const alive = current && Number(current.expires_at_ms) > now;
       if (alive && current.owner && current.owner !== myClientId) {
-        return current;
+        return current; // มีคนถืออยู่
       }
       return {
         owner: myClientId,
@@ -196,17 +219,18 @@ export default function OcrClient() {
     };
   }, [holdRef, myHoldAcquired]);
 
-  // if lost hold → back to booking
+  // ถ้าโดนแย่ง → กลับหน้า booking
   useEffect(() => {
     if (!showBookedPopup) return;
     const to = setTimeout(() => router.replace('/booking'), 1200);
     return () => clearTimeout(to);
   }, [showBookedPopup, router]);
 
-  // OCR helpers
+  // -------- OCR helpers --------
   function extractAmount(text: string): number | undefined {
     const cleaned = text.replace(/[,\s]+/g, ' ');
-    const tokens = cleaned.match(/\d+(?:[ .]\d{3})*(?:[.,]\d{2})|\d+[.,]\d{2}/g) || [];
+    const tokens =
+      cleaned.match(/\d+(?:[ .]\d{3})*(?:[.,]\d{2})|\d+[.,]\d{2}/g) || [];
     if (tokens.length === 0) return undefined;
 
     const candidates = tokens
@@ -286,7 +310,7 @@ export default function OcrClient() {
     setTimeout(() => runOcr(url), 50);
   }
 
-  // -------- confirm --------
+  // -------- ยืนยัน --------
   async function handleConfirm() {
     if (!isOk || running || !fileUrl) return;
     try {
@@ -308,7 +332,7 @@ export default function OcrClient() {
         barberId,
       };
 
-      const res = await fetch(FETCH_URL, {
+      const res = await fetch('/api/payment/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -333,6 +357,7 @@ export default function OcrClient() {
     }
   }
 
+  // ยกเลิก
   async function handleCancel() {
     try {
       if (fileUrl) URL.revokeObjectURL(fileUrl);
@@ -342,12 +367,13 @@ export default function OcrClient() {
     }
   }
 
+  // ผ่าน OCR?
   const isOk =
     !!result &&
     result.amount !== undefined &&
     satangs(result.amount) === satangs(totalExpected);
 
-  // countdown
+  // countdown mm:ss
   const [remainSec, setRemainSec] = useState<number>(0);
   useEffect(() => {
     if (!mounted) return;
@@ -468,7 +494,17 @@ export default function OcrClient() {
         {/* QR */}
         <Card title="สแกนเพื่อชำระ (PromptPay)">
           <div style={{ display: 'grid', justifyItems: 'center', gap: 12 }}>
-            <img src={qrUrl} alt="PromptPay QR" style={{ width: 260, height: 260, borderRadius: 16, objectFit: 'contain', border: `1px solid ${PINK}` }} />
+            {qrDataUrl ? (
+              <img
+                src={qrDataUrl}
+                alt="PromptPay QR"
+                style={{ width: 260, height: 260, borderRadius: 16, objectFit: 'contain', border: `1px solid ${PINK}` }}
+              />
+            ) : (
+              <div style={{ width: 260, height: 260, borderRadius: 16, border: `1px solid ${PINK}`, display: 'grid', placeItems: 'center', color: '#999' }}>
+                กำลังสร้าง QR…
+              </div>
+            )}
             <div style={{ textAlign: 'center', color: '#666' }}>
               โอนยอด <b>{totalExpected.toFixed(2)}</b> บาท (ภายใน {Math.floor(remainSec/60)} นาที {String(remainSec%60).padStart(2,'0')} วินาที)
             </div>
@@ -577,7 +613,7 @@ export default function OcrClient() {
         </Card>
       </div>
 
-      {/* Overlay */}
+      {/* ⏳ Overlay */}
       {saving && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(255,255,255,.65)', display: 'grid', placeItems: 'center', zIndex: 50, backdropFilter: 'blur(2px)' }}>
           <div style={{ display: 'grid', gap: 10, justifyItems: 'center' }}>
@@ -588,7 +624,7 @@ export default function OcrClient() {
         </div>
       )}
 
-      {/* ถูกแย่งคิว */}
+      {/* ⚠️ Popup: คิวถูกปิดไปแล้ว */}
       {showBookedPopup && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.25)', zIndex: 60, display: 'grid', placeItems: 'center' }}>
           <div style={{ width: 340, background: '#fff', borderRadius: 18, padding: 22, display: 'grid', gap: 12, justifyItems: 'center', boxShadow: '0 20px 60px rgba(173,20,87,.25)' }}>
@@ -608,7 +644,7 @@ export default function OcrClient() {
         </div>
       )}
 
-      {/* Summary */}
+      {/* ✅ ป็อปอัป “สรุปการจอง” */}
       {showSummary && (
         <SummaryModal
           text={[
