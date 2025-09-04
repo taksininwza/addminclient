@@ -1,11 +1,10 @@
 // app/admin/Barbers.tsx
 "use client";
-import React, { useMemo, useState } from "react";
+import React from "react";
 
 /* ===== เวลาร้าน (ให้ตรงกับฝั่งจองคิว/หาเวลาว่าง) ===== */
 const OPEN_HOUR = 10;
 const CLOSE_HOUR = 20;
-const SLOT_MIN = 60;
 const LUNCH_START = 12;
 const LUNCH_END = 13;
 
@@ -19,18 +18,23 @@ export type UnavailableBlock = {
   note?: string;
 };
 
+type UnavailMap = Record<string, UnavailableBlock[]>;
+
 type Props = {
   barbers: Record<string, Barber>;
   addBarber: (name: string) => void | Promise<void>;
   deleteBarber: (id: string) => void | Promise<void>;
 
   /** { [barberId]: Array<{id,date,start,end,note}> } */
-  unavailability?: Record<string, UnavailableBlock[]>;
+  unavailability?: UnavailMap;
 
   /** เพิ่มบล็อก “ไม่รับคิว” ให้ช่าง */
   addUnavailable?: (barberId: string, block: Omit<UnavailableBlock, "id">) => void | Promise<void>;
   /** ลบบล็อก “ไม่รับคิว” */
   deleteUnavailable?: (barberId: string, blockId: string) => void | Promise<void>;
+
+  /** ปิดร้านหลายวัน (ทั้งวัน 00:00–23:59) */
+  addShopClosedDates?: (dates: string[]) => void | Promise<void>;
 };
 
 /* ===== Helpers ===== */
@@ -45,11 +49,6 @@ function buildTimeSlots(): string[] {
 }
 const SLOTS = buildTimeSlots();
 const END_SLOTS = [...SLOTS.slice(1), "23:59"];
-
-function isValidISODate(s: string) {
-  // ยอมรับรูปแบบ YYYY-MM-DD แบบตรงเป๊ะ
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
-}
 
 /* ===== UI bits ===== */
 const card: React.CSSProperties = {
@@ -67,8 +66,17 @@ const inputCss: React.CSSProperties = {
   outline: "none",
   fontSize: 14,
 };
+const btnPrimary: React.CSSProperties = {
+  padding: "10px 18px",
+  background: "linear-gradient(135deg,#ff7ac8,#b07cff)",
+  color: "#fff",
+  border: "none",
+  borderRadius: 8,
+  fontWeight: 800,
+  cursor: "pointer",
+};
 
-/* ===== Modal ===== */
+/* ===== Modal Types ===== */
 type ModalOpen =
   | { open: false }
   | {
@@ -77,11 +85,7 @@ type ModalOpen =
       barberName: string;
     };
 
-// ✅ type guard เพื่อให้ TS narrow ได้แน่นอน
-function isModalOpen(s: ModalOpen): s is Extract<ModalOpen, { open: true }> {
-  return s.open === true;
-}
-
+/* ===== UnavailableModal (no conditional hooks) ===== */
 function UnavailableModal({
   openState,
   onClose,
@@ -91,18 +95,19 @@ function UnavailableModal({
   onClose: () => void;
   onSave: (payload: { barberId: string; date: string; start: string; end: string; note: string }) => void;
 }) {
-  if (!isModalOpen(openState)) return null; // narrowed แล้ว
+  // Hooks always at top:
+  const [mode, setMode]   = React.useState<"allday" | "hourly">("allday");
+  const [date, setDate]   = React.useState("");
+  const [start, setStart] = React.useState(SLOTS[0] ?? "10:00");
+  const [end, setEnd]     = React.useState(END_SLOTS[END_SLOTS.length - 1] ?? "20:00");
+  const [note, setNote]   = React.useState("");
+  const [err, setErr]     = React.useState<string | null>(null);
 
-  // destructure หลัง narrow
-  const { barberId, barberName } = openState;
+  const isOpen     = openState.open === true;
+  const barberId   = isOpen ? openState.barberId   : "";
+  const barberName = isOpen ? openState.barberName : "";
 
-  // controlled local state
-  const [mode, setMode] = useState<"allday" | "hourly">("allday");
-  const [date, setDate]   = useState("");
-  const [start, setStart] = useState(SLOTS[0] ?? "10:00");
-  const [end, setEnd]     = useState(END_SLOTS[END_SLOTS.length - 1] ?? "20:00");
-  const [note, setNote]   = useState("");
-  const [err, setErr]     = useState<string | null>(null);
+  if (!isOpen) return null;
 
   const canSave = !!date && (mode === "allday" || (start && end && start < end));
 
@@ -111,7 +116,7 @@ function UnavailableModal({
       setErr(
         mode === "allday"
           ? "กรุณาเลือกวันที่"
-          : "กรุณาเลือกวันที่และช่วงเวลาให้ถูกต้อง (เวลาเริ่มต้องน้อยกว่าสิ้นสุด)"
+          : "กรุณาเลือกช่วงเวลาให้ถูกต้อง (เวลาเริ่มต้องน้อยกว่าสิ้นสุด)"
       );
       return;
     }
@@ -157,11 +162,11 @@ function UnavailableModal({
           {/* โหมด */}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8, border: "1px solid #e2e8f0" }}>
-              <input type="radio" name="mode" checked={mode === "allday"} onChange={() => setMode("allday")} />
+              <input type="radio" name="ua-mode" checked={mode === "allday"} onChange={() => setMode("allday")} />
               ทั้งวัน
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8, border: "1px solid #e2e8f0" }}>
-              <input type="radio" name="mode" checked={mode === "hourly"} onChange={() => setMode("hourly")} />
+              <input type="radio" name="ua-mode" checked={mode === "hourly"} onChange={() => setMode("hourly")} />
               รายชั่วโมง
             </label>
           </div>
@@ -256,15 +261,15 @@ const BarbersPage: React.FC<Props> = ({
   unavailability = {},
   addUnavailable,
   deleteUnavailable,
+  addShopClosedDates,
 }) => {
-  const [newBarberName, setNewBarberName] = useState("");
-  const [modal, setModal] = useState<ModalOpen>({ open: false });
+  const [newBarberName, setNewBarberName] = React.useState("");
+  const [modal, setModal] = React.useState<ModalOpen>({ open: false });
 
-  // ✅ ส่วนปิดร้านหลายวัน (ทั้งร้าน)
-  const [bulkDates, setBulkDates] = useState<string[]>([""]);
-  const [bulkNote, setBulkNote] = useState<string>("ร้านปิด");
+  // ปิดร้านหลายวัน (อินพุตหลายบรรทัด: YYYY-MM-DD คั่นด้วยเว้นบรรทัดหรือจุลภาค)
+  const [shopCloseInput, setShopCloseInput] = React.useState("");
 
-  const totalBarbers = useMemo(() => Object.keys(barbers).length, [barbers]);
+  const totalBarbers = React.useMemo(() => Object.keys(barbers).length, [barbers]);
 
   async function handleSaveModal(payload: { barberId: string; date: string; start: string; end: string; note: string }) {
     try {
@@ -280,45 +285,39 @@ const BarbersPage: React.FC<Props> = ({
       });
       setModal({ open: false });
       alert("บันทึกช่วงไม่รับคิวเรียบร้อย");
-    } catch (e: any) {
+    } catch (e) {
       console.error(e);
-      alert(e?.message || "บันทึกไม่สำเร็จ");
+      alert("บันทึกไม่สำเร็จ");
     }
   }
 
-  async function handleCloseShopAll() {
-    if (!addUnavailable) {
-      alert("ยังไม่ได้เชื่อมฟังก์ชัน addUnavailable จากหน้าแม่");
-      return;
-    }
-    const dates = bulkDates.map((d) => d.trim()).filter((d) => d && isValidISODate(d));
+  function parseDatesInput(raw: string): string[] {
+    const tokens = raw
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    const iso = tokens.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+    return Array.from(new Set(iso)); // unique
+  }
+
+  async function handleShopCloseSubmit() {
+    const dates = parseDatesInput(shopCloseInput);
     if (dates.length === 0) {
-      alert("กรุณาใส่วันที่อย่างน้อย 1 วัน (รูปแบบ YYYY-MM-DD)");
+      alert("กรุณากรอกวันที่รูปแบบ YYYY-MM-DD อย่างน้อย 1 วัน (คั่นด้วยบรรทัดใหม่หรือ ,)");
       return;
     }
-    if (Object.keys(barbers).length === 0) {
-      alert("ยังไม่มีรายชื่อช่าง");
+    if (!addShopClosedDates) {
+      alert("ยังไม่ได้เชื่อมฟังก์ชัน addShopClosedDates จากหน้าแม่");
       return;
     }
-
-    if (!confirm(`ยืนยันปิดร้านทั้งร้านใน ${dates.length} วัน ?`)) return;
-
     try {
-      for (const bid of Object.keys(barbers)) {
-        for (const d of dates) {
-          await addUnavailable(bid, {
-            date: d,
-            start: "00:00",
-            end: "23:59",
-            note: bulkNote || "ร้านปิด",
-          });
-        }
-      }
-      alert("บันทึกการปิดร้านเรียบร้อย");
-      setBulkDates([""]);
-    } catch (e: any) {
+      await addShopClosedDates(dates);
+      setShopCloseInput("");
+      alert("บันทึกวันปิดร้านสำเร็จ");
+    } catch (e) {
       console.error(e);
-      alert(e?.message || "บันทึกไม่สำเร็จ");
+      alert("บันทึกวันปิดร้านไม่สำเร็จ");
     }
   }
 
@@ -357,15 +356,7 @@ const BarbersPage: React.FC<Props> = ({
             await addBarber(n);
             setNewBarberName("");
           }}
-          style={{
-            padding: "10px 18px",
-            background: "#22c55e",
-            color: "#fff",
-            border: "none",
-            borderRadius: 8,
-            fontWeight: 700,
-            cursor: "pointer",
-          }}
+          style={btnPrimary}
         >
           เพิ่มช่าง
         </button>
@@ -480,95 +471,36 @@ const BarbersPage: React.FC<Props> = ({
         </ul>
       </div>
 
-      {/* ===== ปิดร้านทั้งร้าน (เลือกหลายวัน) ===== */}
-      <div style={{ ...card, marginTop: 18 }}>
-        <h3 style={{ margin: 0, marginBottom: 10, color: "#22223b" }}>วันหยุด</h3>
-
-        <div style={{ display: "grid", gap: 10 }}>
-          {/* รายการวันหลายแถว */}
-          {bulkDates.map((d, idx) => (
-            <div key={idx} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input
-                type="date"
-                value={d}
-                onChange={(e) => {
-                  const next = [...bulkDates];
-                  next[idx] = e.target.value;
-                  setBulkDates(next);
-                }}
-                style={{ ...inputCss, width: 200 }}
-              />
-              <button
-                onClick={() => {
-                  const next = bulkDates.filter((_, i) => i !== idx);
-                  setBulkDates(next.length ? next : [""]);
-                }}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 8,
-                  border: "1px solid #e2e8f0",
-                  background: "#fff",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-                aria-label="ลบแถววันนี้"
-              >
-                ลบวัน
-              </button>
-            </div>
-          ))}
-
-          <div>
-            <button
-              onClick={() => setBulkDates((x) => [...x, ""])}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 8,
-                border: "1px dashed #cbd5e1",
-                background: "#fff",
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              + เพิ่มวัน
-            </button>
-          </div>
-
-          <div>
-            <div style={{ fontWeight: 700, marginBottom: 6, color: "#c2185b" }}>หมายเหตุ</div>
-            <input
-              value={bulkNote}
-              onChange={(e) => setBulkNote(e.target.value)}
-              placeholder="เช่น ร้านปิด / วันหยุดพิเศษ"
-              style={{ ...inputCss, width: "min(520px, 100%)" }}
-            />
-          </div>
-
-          <div style={{ display: "flex", justifyContent: "flex-end" }}>
-            <button
-              onClick={handleCloseShopAll}
-              style={{
-                padding: "10px 16px",
-                borderRadius: 10,
-                border: "none",
-                background: "linear-gradient(135deg,#ff7ac8,#b07cff)",
-                color: "#fff",
-                fontWeight: 800,
-                cursor: "pointer",
-              }}
-            >
-              หยุดร้าน
-            </button>
-          </div>
-        </div>
-      </div>
-
       {/* Modal */}
       <UnavailableModal
         openState={modal}
         onClose={() => setModal({ open: false })}
         onSave={handleSaveModal}
       />
+
+      {/* ===== ปิดร้านหลายวัน (ทั้งวัน) ===== */}
+      <div style={{ ...card, marginTop: 20 }}>
+        <h3 style={{ margin: 0, marginBottom: 10, color: "#22223b" }}>ปิดร้านหลายวัน (ทั้งวัน)</h3>
+        <div style={{ color: "#64748b", marginBottom: 10 }}>
+          กรอกวันที่รูปแบบ <b>YYYY-MM-DD</b> ได้หลายวัน คั่นด้วยบรรทัดใหม่หรือเครื่องหมายจุลภาค <b>,</b><br />
+          เช่น <code>2025-09-10</code>, <code>2025-09-12</code>
+        </div>
+        <textarea
+          rows={4}
+          placeholder={"เช่น:\n2025-09-10\n2025-09-12, 2025-09-18"}
+          value={shopCloseInput}
+          onChange={(e) => setShopCloseInput(e.target.value)}
+          style={{ ...inputCss, width: "100%", resize: "vertical" }}
+        />
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+          <button
+            onClick={handleShopCloseSubmit}
+            style={btnPrimary}
+          >
+            บันทึกวันปิดร้าน
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
