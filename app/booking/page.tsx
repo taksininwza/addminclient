@@ -99,6 +99,14 @@ function stripDigitsFromName(s: string) {
   return s.replace(/[0-9๐-๙]/g, '');
 }
 
+// ✅ เกณฑ์เบอร์ไทยพื้นฐาน
+const PHONE_MIN = 9;      // บางหมายเลขบริการสั้นกว่า 10
+const PHONE_MAX = 10;
+const isValidThaiPhone = (raw: string) => {
+  const d = stripNonDigits(raw);
+  return /^0\d{8,9}$/.test(d) && d.length >= PHONE_MIN && d.length <= PHONE_MAX;
+};
+
 export default function BookingPage() {
   const router = useRouter();
 
@@ -116,8 +124,7 @@ export default function BookingPage() {
   const [reservations, setReservations] = useState<Record<string, Reservation>>({});
   const [payments, setPayments] = useState<Record<string, Payment>>({});
 
-  // ⭐ Soft-holds (อ่านจาก RTDB เพื่อตัดเวลาออกชั่วคราว)
-  // โครงสร้างใน RTDB: slot_holds/{date}/{barberId}/{HH:mm} = { expires_at_ms, owner }
+  // ⭐ Soft-holds
   const [holds, setHolds] = useState<Record<string, Record<string, Record<string, HoldNode>>>>({});
 
   // ✅ ช่วง “ปิดรับคิว” ต่อช่าง
@@ -126,7 +133,7 @@ export default function BookingPage() {
   const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // โหลดรายชื่อช่าง + การจอง + การชำระ
+  // โหลดข้อมูล
   useEffect(() => {
     const unsubBarbers = onValue(ref(database, "barbers"), (s) => {
       const b = s.val() || {};
@@ -149,7 +156,7 @@ export default function BookingPage() {
     };
   }, [selectedBarberId]);
 
-  // ⭐ subscribe soft-holds เฉพาะของวันที่เลือก
+  // subscribe holds เฉพาะวัน
   useEffect(() => {
     if (!dateStr) return;
     const off = onValue(ref(database, `slot_holds/${dateStr}`), (snap) => {
@@ -158,7 +165,7 @@ export default function BookingPage() {
     return () => off();
   }, [dateStr]);
 
-  // ✅ subscribe ช่วงไม่รับคิวทั้งหมด
+  // subscribe ช่วงไม่รับคิว
   useEffect(() => {
     const off = onValue(ref(database, 'unavailability'), (snap) => {
       const raw = snap.val() || {};
@@ -183,7 +190,7 @@ export default function BookingPage() {
     return () => off();
   }, []);
 
-  // helper: เช็คว่า HH:mm ถูก hold อยู่ไหม
+  // helper: เช็ค hold
   function isHeld(barberId: string | undefined, hhmm: string): boolean {
     if (!barberId) return false;
     const node: HoldNode | undefined = holds?.[dateStr]?.[barberId]?.[hhmm];
@@ -191,7 +198,7 @@ export default function BookingPage() {
     return Number(node.expires_at_ms) > Date.now();
   }
 
-  // สร้างช่วงเวลา 10–20 (เว้นพักเที่ยง) และตัดเวลาที่ผ่านมาใน "วันนี้"
+  // ช่วงเวลาเปิดทำการ
   const timeSlots = useMemo(() => {
     const base = dayjs(dateStr);
     const slots: string[] = [];
@@ -216,11 +223,10 @@ export default function BookingPage() {
     [selectedBarberId, barbers]
   );
 
-  // ช่องเวลาที่ถูกจองแล้ว (จาก LINE + จากการชำระยืนยันแล้ว)
+  // times ที่ถูกจองแล้ว
   const reservedTimes = useMemo(() => {
     const set = new Set<string>();
 
-    // จาก reservations/*
     Object.values(reservations || {}).forEach((r) => {
       if (!r) return;
       const sameDate = r.appointment_date === dateStr;
@@ -230,7 +236,6 @@ export default function BookingPage() {
       }
     });
 
-    // จาก payments/* (เฉพาะที่ยืนยันแล้ว)
     Object.values(payments || {}).forEach((p) => {
       if (!p) return;
       const isConfirmed = p.status === 'confirmed' || p.matched === true;
@@ -251,7 +256,7 @@ export default function BookingPage() {
     return set;
   }, [reservations, payments, dateStr, selectedBarberId, barberName]);
 
-  // ⭐ คำนวณ "เวลาเริ่มต้น" ที่จองได้ — เคารพ holds + reserved + ช่วงปิดรับ
+  // start times ที่จองได้
   const availableStartTimes = useMemo(() => {
     return computeAvailableStartTimes({
       timeSlots,
@@ -260,7 +265,7 @@ export default function BookingPage() {
       barberId: selectedBarberId,
       reservedTimes,
       holds,
-      unavailability, // ✅ กันช่วงปิดรับด้วย
+      unavailability,
     });
   }, [
     timeSlots,
@@ -272,7 +277,7 @@ export default function BookingPage() {
     unavailability,
   ]);
 
-  // สำหรับแสดงช่วงเวลา start–end
+  // ช่วงเวลาแสดง
   const renderRange = (start: string) => {
     const end = dayjs(`${dateStr} ${start}`).add(durationHours * SLOT_MIN, "minute").format("HH:mm");
     return `${start}–${end}`;
@@ -299,17 +304,23 @@ export default function BookingPage() {
     if (!nameClean) return setError("กรุณากรอกชื่อ");
     if (/[0-9๐-๙]/.test(nameClean)) return setError("ชื่อห้ามมีตัวเลข");
 
+    // ✅ บังคับกรอกเบอร์ + รูปแบบ
+    if (!phoneClean) return setError("กรุณากรอกเบอร์โทร");
+    if (!isValidThaiPhone(phoneClean)) {
+      return setError("รูปแบบเบอร์ไม่ถูกต้อง (ควรขึ้นต้นด้วย 0 และยาว 9–10 หลัก)");
+    }
+
     if (!dateStr) return setError("กรุณาเลือกวันที่");
     const chosenStart = (document.querySelector('input[name="timeStart"]:checked') as HTMLInputElement | null)?.value;
     if (!chosenStart) return setError("กรุณาเลือกเวลาเริ่มต้น");
     if (!selectedBarberId) return setError("กรุณาเลือกช่าง");
 
-    // สร้างรายการเวลาทั้งช่วงตามชั่วโมงที่เลือก
+    // สร้างช่วงเวลาทั้งช่วง
     const selectedTimes: string[] = Array.from({ length: durationHours }, (_, k) =>
       dayjs(`${dateStr} ${chosenStart}`).add(k * SLOT_MIN, "minute").format("HH:mm")
     );
 
-    // กันชนจาก reservations (ยืนยันแล้วจากฝั่งไลน์)
+    // กันชนต่าง ๆ
     const clashFromReservations = Object.values(reservations).some(
       (r) =>
         r.appointment_date === dateStr &&
@@ -317,7 +328,6 @@ export default function BookingPage() {
         selectedTimes.includes(r.appointment_time)
     );
 
-    // กันชนจาก payments (ที่ยืนยันแล้ว)
     const barberNm = barbers[selectedBarberId]?.name || '';
     const clashFromPayments = Object.values(payments).some((p) => {
       const isConfirmed = p?.status === 'confirmed' || p?.matched === true;
@@ -330,10 +340,8 @@ export default function BookingPage() {
       return !!(sameDate && sameBarber && p?.time && selectedTimes.includes(p.time));
     });
 
-    // กันชนจาก soft-hold (มีคนกำลังกรอกหน้า OCR)
     const clashFromHolds = selectedTimes.some((t) => isHeld(selectedBarberId, t));
 
-    // ✅ กันชนจากช่วงไม่รับคิว
     const blocks = unavailability[selectedBarberId] || [];
     const clashFromUnavailability = selectedTimes.some((t) =>
       isBlockedAt(dateStr, t, blocks)
@@ -350,7 +358,6 @@ export default function BookingPage() {
     const chosenService = services.find((s) => s.id === serviceId)?.title || "";
     const barberNameSel = barbers[selectedBarberId]?.name || "";
 
-    // ใช้เศษสตางค์ไม่ซ้ำ เดิมตามระบบ
     const base   = DEPOSIT_THB * 1;
     const unique = computeUniqueAmount(base, refCode);
 
@@ -358,12 +365,13 @@ export default function BookingPage() {
       expected: unique.toFixed(2),
       ref: refCode,
       name: nameClean,
+      phone: phoneClean,          // ✅ ส่งต่อเบอร์ไปหน้า OCR
       service: chosenService,
       date: dateStr,
       time: chosenStart,
       hours: String(durationHours),
-      barber: barberNameSel,       // เพื่อโชว์
-      barberId: selectedBarberId,  // ✅ ส่ง id จริงไปหน้า OCR เพื่อทำ hold
+      barber: barberNameSel,
+      barberId: selectedBarberId,
       minutes: '15'
     });
 
@@ -468,6 +476,7 @@ export default function BookingPage() {
                     background: "#fff",
                     display: "block",
                   }}
+                  required
                 />
               </div>
             </div>
@@ -486,7 +495,7 @@ export default function BookingPage() {
             </div>
           </div>
 
-          {/* เวลาเริ่ม (ต้องมีช่วงต่อกันครบตามชั่วโมงที่เลือก) */}
+          {/* เวลาเริ่ม */}
           <div style={{ marginBottom: 12 }}>
             <label style={{ fontWeight: 800, color: "#c2185b", display: "block", marginBottom: 6 }}>
               เวลา (เริ่มต้น) — จอง {durationHours} ชั่วโมง
@@ -499,7 +508,7 @@ export default function BookingPage() {
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 }}>
                 {availableStartTimes.map((t) => (
                   <label key={t} style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #ffd6ec", padding: "10px 12px", borderRadius: 10, cursor: "pointer", background: "#fff" }}>
-                    <input type="radio" name="timeStart" value={t} />
+                    <input type="radio" name="timeStart" value={t} required />
                     <span style={{ fontWeight: 700 }}>{renderRange(t)}</span>
                   </label>
                 ))}
@@ -517,7 +526,9 @@ export default function BookingPage() {
                 onKeyDown={onNameKeyDown}
                 onBlur={(e) => setCustomerName(stripDigitsFromName(e.target.value.trim()))}
                 placeholder="ชื่อของคุณ"
-                pattern="[^0-9]+"
+                pattern="[^0-9๐-๙]+"
+                required                                    // ✅ บังคับกรอก
+                autoComplete="name"
                 style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 10, border: "1px solid #ffd6ec", background: "#fff" }}
               />
             </div>
@@ -526,12 +537,14 @@ export default function BookingPage() {
               <input
                 type="tel"
                 inputMode="numeric"
-                pattern="[0-9]*"
+                pattern="0[0-9]{8,9}"                       // ✅ 0 ตามด้วยอีก 8–9 ตัว
                 value={phone}
                 onKeyDown={onPhoneKeyDown}
                 onChange={(e) => setPhone(stripNonDigits(e.target.value))}
                 onBlur={(e) => setPhone(stripNonDigits(e.target.value))}
                 placeholder="08xxxxxxxx"
+                required                                    // ✅ บังคับกรอก
+                autoComplete="tel"
                 style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 10, border: "1px solid #ffd6ec", background: "#fff" }}
               />
             </div>

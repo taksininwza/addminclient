@@ -7,17 +7,18 @@ export const dynamic = 'force-dynamic';  // ห้าม prerender
 type ConfirmPayload = {
   refCode: string;
   customerName?: string;
+  phone?: string;            // ✅ เพิ่ม: รับเบอร์มาจากฟอร์ม
   serviceType?: string;
-  date: string;          // YYYY-MM-DD
-  time: string;          // HH:mm
+  date: string;              // YYYY-MM-DD
+  time: string;              // HH:mm
   hours: number;
   barber?: string;
-  barberId: string;      // ใช้ล็อกคิว
+  barberId: string;          // ใช้ล็อกคิว
   amountRead?: number | null;
   expected: number;
-  matched: boolean;      // OCR ตรง
+  matched: boolean;          // OCR ตรง
   createdAtISO?: string;
-  slotId?: string;       // option
+  slotId?: string;           // option
 };
 
 // --- Lazy Admin init (หลีกเลี่ยง error ตอน build) ---
@@ -87,11 +88,16 @@ export async function POST(req: Request) {
     const lockRef  = db.ref(lockPath);
 
     // ใช้ transaction กันชนคิวซ้ำ
-    const txRes = await lockRef.transaction((current: unknown) => {
-      // current === true แปลว่าถูกจอง/ยืนยันแล้ว
-      if (current === true) return; // abort (no write)
-      return true;                  // mark booked
-    }, { applyLocally: false });
+    const txRes = await lockRef.transaction(
+      (current: unknown) => {
+        // current === true แปลว่าถูกจอง/ยืนยันแล้ว
+        if (current === true) return; // abort (no write)
+        return true;                  // mark booked
+      },
+      // ✅ onComplete = null แล้วค่อย applyLocally = false
+      null,
+      false
+    );
 
     if (!txRes.committed) {
       // มีคนจองไปก่อนหน้า
@@ -110,7 +116,15 @@ export async function POST(req: Request) {
     const paymentRecord = {
       id: paymentId,
       ref: body.refCode,
+
+      // ✅ เก็บชื่อทั้ง 2 รูปแบบเพื่อความเข้ากันได้
       customer_name: body.customerName || '',
+      customerName:  body.customerName || '',
+
+      // ✅ เบอร์โทรทั้ง 2 คีย์: อ่านได้ทั้ง p.phone และ p.customer_phone
+      customer_phone: body.phone || '',
+      phone:          body.phone || '',
+
       service_title: body.serviceType || '',
       date: body.date,
       time: body.time,
@@ -129,7 +143,6 @@ export async function POST(req: Request) {
     await paymentsRef.set(paymentRecord);
 
     // (ถ้าต้องการสร้าง reservations ด้วย สามารถเพิ่มได้ที่นี่)
-    // ตัวอย่าง:
     // if (body.matched) {
     //   const reservationsRef = db.ref('reservations').push();
     //   await reservationsRef.set({
@@ -137,6 +150,7 @@ export async function POST(req: Request) {
     //     appointment_time: body.time,
     //     barber_id: body.barberId,
     //     customer_name: body.customerName || '',
+    //     customer_phone: body.phone || '',
     //     service_title: body.serviceType || '',
     //     created_at: nowISO,
     //     payment_id: paymentId,

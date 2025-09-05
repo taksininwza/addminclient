@@ -26,7 +26,7 @@ interface Reservation {
   via?: "web" | "line";
   status?: string;
   payment_status?: string;
-  use_point?: boolean;            // ✅ ใช้แต้มสะสม (จาก LINE)
+  use_point?: boolean;
 }
 type ReservationWithId = Reservation & { id: string };
 
@@ -38,12 +38,17 @@ type Payment = {
   barber?: string;
   barber_id?: string;
   status?: string;
+  payment_status?: string;
   matched?: boolean;
   createdAt?: number;
   createdAtISO?: string;
-  customerName?: string;
-  payment_status?: string;
-  use_point?: boolean;           // (เผื่อมีจากเว็บ)
+  customerName?: string;   // camel
+  customer_name?: string;  // snake
+  phone?: string;
+  customer_phone?: string;
+  use_point?: boolean;
+  created_at?: string;
+  server_time_ms?: number;
 };
 type PaymentWithId = Payment & { id: string };
 
@@ -60,10 +65,10 @@ type UnifiedItem = {
   barberId?: string;
   barberName?: string;
   customerName?: string;
-  usedPoint?: boolean;           // ✅ ติดธงว่าใช้แต้ม
+  usedPoint?: boolean;
 };
 
-const COLORS = ['#f472b6', '#ec4899', '#fbbf24', '#38bdf8', '#a3e635', '#f87171', '#818cf8', '#facc15', '#34d399', '#fb7185'];
+const COLORS = ['#60a5fa', '#fbbf24', '#f472b6', '#a78bfa', '#34d399', '#fb7185', '#f59e0b', '#22d3ee'];
 
 // ---------- Helpers ----------
 const toLower = (s?: string) => (s || "").toLowerCase();
@@ -79,7 +84,7 @@ type Props = {
   totalBarbers: number;
   dailySummary: any[];
   monthlySummary: any[];
-  barberSummary: any[];
+  barberSummary: any[]; // (ไม่ใช้แล้ว แต่คง prop ไว้เพื่อไม่พัง SSR)
 };
 
 const DashboardPage: React.FC<Props> = ({
@@ -88,18 +93,22 @@ const DashboardPage: React.FC<Props> = ({
   totalBarbers,
   dailySummary,
   monthlySummary,
-  barberSummary
 }) => {
   const getBarberNameById = (id?: string) =>
     (id && barbers[id]?.name) || id || "ไม่ระบุช่าง";
 
-  // ===== Realtime =====
+  // ===== Realtime (รายการล่าสุด) =====
   const [latestReservations, setLatestReservations] = React.useState<ReservationWithId[]>([]);
   const [latestPayments, setLatestPayments] = React.useState<PaymentWithId[]>([]);
   const [lineRemoved, setLineRemoved] = React.useState<ReservationWithId[]>([]);
   const [latestUnified, setLatestUnified] = React.useState<UnifiedItem[]>([]);
 
+  // ===== Realtime (ข้อมูลเต็มสำหรับสรุปช่าง + ช่องทาง) =====
+  const [allReservations, setAllReservations] = React.useState<Record<string, Reservation>>({});
+  const [allPayments, setAllPayments] = React.useState<Record<string, Payment>>({});
+
   React.useEffect(() => {
+    // ล่าสุด 30 แถวสำหรับ “การจองล่าสุด”
     const unsubRes = onValue(
       query(ref(database, "reservations"), orderByChild("created_at"), limitToLast(30)),
       (snap) => {
@@ -112,7 +121,8 @@ const DashboardPage: React.FC<Props> = ({
     );
 
     const unsubPay = onValue(
-      query(ref(database, "payments"), orderByChild("createdAt"), limitToLast(30)),
+      // ใช้ field ที่การันตีว่ามี (ตอน confirm payment เซ็ตไว้)
+      query(ref(database, "payments"), orderByChild("server_time_ms"), limitToLast(30)),
       (snap) => {
         const val = snap.val() || {};
         const arr: PaymentWithId[] = Object.entries(val).map(
@@ -130,7 +140,15 @@ const DashboardPage: React.FC<Props> = ({
       setLineRemoved(prev => [item, ...prev].slice(0, 30));
     });
 
-    return () => { unsubRes(); unsubPay(); unsubRemoved(); };
+    // ทั้งก้อนสำหรับสรุปกราฟ/โดนัท
+    const offResAll = onValue(ref(database, "reservations"), (snap) => {
+      setAllReservations(snap.val() || {});
+    });
+    const offPayAll = onValue(ref(database, "payments"), (snap) => {
+      setAllPayments(snap.val() || {});
+    });
+
+    return () => { unsubRes(); unsubPay(); unsubRemoved(); offResAll(); offPayAll(); };
   }, []);
 
   // map status
@@ -150,6 +168,15 @@ const DashboardPage: React.FC<Props> = ({
   };
 
   React.useEffect(() => {
+    // ===== ทำดัชนีของ reservation เพื่อ fallback ให้ payment =====
+    const resIndex = new Map<string, ReservationWithId>();
+    latestReservations.forEach((r) => {
+      const barberName = getBarberNameById(r.barber_id);
+      const barberKey = r.barber_id ? `ID:${r.barber_id}` : `NM:${(barberName || "").toUpperCase()}`;
+      const key = `${r.appointment_date}|${r.appointment_time}|${barberKey}`;
+      resIndex.set(key, r);
+    });
+
     // RES
     const resItems: UnifiedItem[] = latestReservations.map((r) => {
       const ts = r.created_at
@@ -172,7 +199,7 @@ const DashboardPage: React.FC<Props> = ({
         barberId: r.barber_id,
         barberName,
         customerName: r.customer_name,
-        usedPoint: boolish((r as any).use_point),           // ✅
+        usedPoint: boolish((r as any).use_point),
       };
     });
 
@@ -181,6 +208,7 @@ const DashboardPage: React.FC<Props> = ({
       const ts =
         (typeof p.createdAt === "number" && p.createdAt) ||
         (p.createdAtISO ? new Date(p.createdAtISO).getTime() : undefined) ||
+        (typeof p.server_time_ms === "number" ? p.server_time_ms : undefined) ||
         dayjs(`${p.date ?? ""} ${p.time ?? ""}`).valueOf();
 
       const barberName = p.barber_id ? getBarberNameById(p.barber_id) : (p.barber || "ไม่ระบุช่าง");
@@ -188,9 +216,18 @@ const DashboardPage: React.FC<Props> = ({
         ? `ID:${p.barber_id}`
         : `NM:${(barberName || "").toUpperCase()}`;
 
+      const key = `${p.date ?? ""}|${p.time ?? ""}|${barberKey}`;
+      const fromRes = resIndex.get(key); // fallback source
+
+      const customerName =
+        (p as any).customerName ??
+        (p as any).customer_name ??
+        fromRes?.customer_name ??
+        "";
+
       return {
         id: `PAY_${p.id}`,
-        key: `${p.date ?? ""}|${p.time ?? ""}|${barberKey}`,
+        key,
         ts: Number.isFinite(ts as number) ? (ts as number) : Date.now(),
         source: "payment",
         status: statusFromPayment(p),
@@ -198,8 +235,8 @@ const DashboardPage: React.FC<Props> = ({
         time: p.time,
         barberId: p.barber_id,
         barberName,
-        customerName: p.customerName,
-        usedPoint: boolish((p as any).use_point),           // ✅ (ถ้ามี)
+        customerName,
+        usedPoint: boolish((p as any).use_point),
       };
     });
 
@@ -223,11 +260,11 @@ const DashboardPage: React.FC<Props> = ({
         barberId: r.barber_id,
         barberName,
         customerName: r.customer_name,
-        usedPoint: boolish((r as any).use_point),           // ✅
+        usedPoint: boolish((r as any).use_point),
       };
     });
 
-    // merge priority
+    // merge priority + preserve fields
     const score = (s: UnifiedStatus) =>
       s === "confirmed" ? 3 :
       s === "mismatch"  ? 2 :
@@ -242,12 +279,13 @@ const DashboardPage: React.FC<Props> = ({
       } else {
         const prevScore = score(prev.status);
         const curScore  = score(item.status);
-        if (curScore > prevScore || (curScore === prevScore && item.ts > prev.ts)) {
-          map.set(item.key, item);
-        }
-        // ถ้าทั้งคู่มี key เดียวกัน ให้ preserve ธง usedPoint ถ้าอันใหม่หรืออันเก่ามี
-        const merged = map.get(item.key)!;
-        merged.usedPoint = (prev?.usedPoint || item.usedPoint) ? true : false;
+        const winner = (curScore > prevScore || (curScore === prevScore && item.ts > prev.ts)) ? item : prev;
+
+        const merged: UnifiedItem = {
+          ...winner,
+          customerName: winner.customerName || prev.customerName || item.customerName,
+          usedPoint:    !!(prev.usedPoint || item.usedPoint),
+        };
         map.set(item.key, merged);
       }
     });
@@ -259,26 +297,62 @@ const DashboardPage: React.FC<Props> = ({
     setLatestUnified(merged);
   }, [latestReservations, latestPayments, lineRemoved, barbers]);
 
-  // ===== ช่องทางการจอง (เว็บ/ไลน์)
-  const [webCount, setWebCount] = React.useState(0);
-  const [lineCount, setLineCount] = React.useState(0);
-
-  React.useEffect(() => {
-    const offPay = onValue(ref(database, "payments"), (snap) => {
-      const v = snap.val() || {};
-      setWebCount(Object.keys(v).length);
-    });
-    const offRes = onValue(ref(database, "reservations"), (snap) => {
-      const v = snap.val() || {};
-      setLineCount(Object.keys(v).length);
-    });
-    return () => { offPay(); offRes(); };
-  }, []);
+  // ===== ช่องทางการจอง (เว็บ/ไลน์) + สรุปช่างแบบ realtime =====
+  const webCount = React.useMemo(() => Object.keys(allPayments).length, [allPayments]);
+  const lineCount = React.useMemo(() => Object.keys(allReservations).length, [allReservations]);
 
   const channelDonutData = React.useMemo(() => ([
     { name: "ผ่านเว็บ", value: webCount },
     { name: "ผ่านไลน์", value: lineCount },
   ]), [webCount, lineCount]);
+
+  const barberSummaryLive = React.useMemo(() => {
+    // รวม count ต่อช่างจาก LINE + PAY(confirmed)
+    const counts = new Map<string, number>();
+
+    // LINE
+    Object.values(allReservations).forEach((r) => {
+      if (!r) return;
+      const s1 = r.status, s2 = r.payment_status;
+      if (isCancelledWord(s1) || isCancelledWord(s2)) return;
+      const key = r.barber_id || (getBarberNameById(r.barber_id) ?? "ไม่ระบุช่าง");
+      counts.set(key, (counts.get(key) || 0) + 1);
+    });
+
+    // WEB (เฉพาะยืนยันแล้ว)
+    Object.values(allPayments).forEach((p) => {
+      if (!p) return;
+      if (isCancelledWord(p.status) || isCancelledWord(p.payment_status)) return;
+      const confirmed = p.matched === true || isPaidWord(p.status) || isPaidWord(p.payment_status);
+      if (!confirmed) return;
+
+      const id = p.barber_id;
+      let key = id || "";
+      if (!key) {
+        // จับชื่อให้ตรง id ถ้าได้
+        const entry = Object.entries(barbers).find(([, b]) =>
+          (b.name || "").trim().toLowerCase() === (p.barber || "").trim().toLowerCase()
+        );
+        key = entry?.[0] || "ไม่ระบุช่าง";
+      }
+      counts.set(key, (counts.get(key) || 0) + 1);
+    });
+
+    // map เป็น array พร้อมชื่อ
+    const arr = Array.from(counts.entries()).map(([id, cnt]) => ({
+      name: getBarberNameById(id),
+      count: cnt,
+    }));
+
+    // ให้แสดงช่างที่เพิ่งถูกสร้าง/ลบ อัปเดตตาม barbers เสมอ (ไม่มีงาน = 0)
+    Object.entries(barbers).forEach(([id, b]) => {
+      if (!arr.find((x) => x.name === b.name)) arr.push({ name: b.name, count: 0 });
+    });
+
+    // เรียงมาก→น้อย
+    arr.sort((a, b) => b.count - a.count);
+    return arr;
+  }, [allReservations, allPayments, barbers]);
 
   // ===== UI helpers =====
   const pillStyle = (status: UnifiedStatus) => {
@@ -293,7 +367,6 @@ const DashboardPage: React.FC<Props> = ({
     }
     return { bg: "#eef2ff", fg: "#3730a3", bd: "#c7d2fe", text: "รอยืนยัน" };
   };
-  const pointPill = { bg: "#fef3c7", fg: "#92400e", bd: "#fde68a", text: "ใช้แต้ม" }; // ✅ สีเหลือง
 
   // ===== Styles =====
   const pageWrap: React.CSSProperties = {
@@ -353,7 +426,7 @@ const DashboardPage: React.FC<Props> = ({
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
               {latestUnified.map((item, idx) => {
                 const s = pillStyle(item.status);
-                const rowBg = item.usedPoint ? "#fffbeb" : "transparent"; // ✅ พื้นหลังเหลืองอ่อนมาก
+                const rowBg = item.usedPoint ? "#fffbeb" : "transparent";
                 return (
                   <li
                     key={item.id || idx}
@@ -376,19 +449,9 @@ const DashboardPage: React.FC<Props> = ({
                         {s.text}
                       </span>
 
-                      {/* ✅ ป้าย "ใช้แต้ม" สีเหลือง */}
-                      {item.usedPoint && (
-                        <span style={{
-                          padding: "4px 10px", borderRadius: 999,
-                          background: pointPill.bg, color: pointPill.fg,
-                          fontWeight: 800, fontSize: 13, border: `1px solid ${pointPill.bd}`
-                        }}>
-                          {pointPill.text}
-                        </span>
-                      )}
-
                       <span style={{ fontWeight: 700, color: "#4f8cff" }}>{item.barberName || "ไม่ระบุช่าง"}</span>
                       <span style={{ color: "#475569" }}>{item.customerName || "-"}</span>
+                      {/* ⛔ ไม่แสดงเบอร์ใน Dashboard ตามที่ขอ */}
                     </div>
                     <div style={{ color: "#22223b", fontWeight: 600, minWidth: 160, textAlign: "right" }}>
                       {(item.date ? dayjs(item.date).format("DD/MM/YYYY") : "")} {item.time || ""}
@@ -422,7 +485,7 @@ const DashboardPage: React.FC<Props> = ({
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
-                    data={barberSummary}
+                    data={barberSummaryLive}
                     dataKey="count"
                     nameKey="name"
                     cx="50%"
@@ -430,11 +493,11 @@ const DashboardPage: React.FC<Props> = ({
                     outerRadius={120}
                     label={({ name, percent }) => `${name} (${((percent ?? 0) * 100).toFixed(0)}%)`}
                   >
-                    {barberSummary.map((_, idx) => (
+                    {barberSummaryLive.map((_, idx) => (
                       <Cell key={idx} fill={COLORS[idx % COLORS.length]} />
                     ))}
                   </Pie>
-                  <Tooltip />
+                  <Tooltip formatter={(value) => `${value} ครั้ง`} />
                   <Legend />
                 </PieChart>
               </ResponsiveContainer>

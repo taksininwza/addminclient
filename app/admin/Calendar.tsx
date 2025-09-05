@@ -17,13 +17,11 @@ interface Reservation {
   note?: string;
   line_user_id?: string;
 
-  // อาจมีถ้าเซฟไว้ตอนจอง
   payment_id?: string;
   payment_ref?: string;
   payment_status?: string;       // หรือ status
   status?: string;
 
-  // ✅ ธงใช้แต้ม
   use_point?: boolean | string | number;
 }
 interface Barber { name: string }
@@ -34,10 +32,14 @@ interface Payment {
   hours?: number;
   barber?: string;
   barber_id?: string;
-  customerName?: string;
-  phone?: string;
-  note?: string;
 
+  // ชื่อ/เบอร์ อาจมาได้หลายคีย์
+  customerName?: string;         // camel
+  customer_name?: string;        // snake
+  phone?: string;
+  customer_phone?: string;
+
+  note?: string;
   status?: string;
   matched?: boolean;
   payment_status?: string;
@@ -45,7 +47,6 @@ interface Payment {
   createdAtISO?: string;
   payment_ref?: string;
 
-  // ✅ เผื่อมีจากเว็บ
   use_point?: boolean | string | number;
 }
 
@@ -64,7 +65,7 @@ type MergedReservation = {
   end_time: string;              // HH:mm
   total_hours: number;
   source: "web" | "line" | "mixed";
-  usedPoint?: boolean;           // ✅ ใช้แต้มสะสมหรือไม่ (รวม)
+  usedPoint?: boolean;           // ใช้แต้มสะสมหรือไม่ (รวม)
 };
 
 type Props = {
@@ -224,7 +225,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
           cur.tuples.push({ id: seg.id, source: seg.source });
           cur.endM = Math.max(cur.endM, seg.endM);
           cur.srcSet.add(seg.source);
-          cur.usedPoint = cur.usedPoint || seg.usedPoint;   // ✅ ถ้ามีช่วงไหนใช้แต้ม ให้รวมเป็น true
+          cur.usedPoint = cur.usedPoint || seg.usedPoint;   // ถ้ามีช่วงไหนใช้แต้ม ให้รวมเป็น true
         } else {
           merged.push({
             ids: cur.ids,
@@ -289,10 +290,10 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
         id,
         res,
         source: "line" as const,
-        usedPoint: boolish((res as any).use_point), // ✅
+        usedPoint: boolish((res as any).use_point),
       }));
 
-    // WEB (แปลงให้เป็นโครง Reservation)
+    // WEB (แปลงให้เป็นโครง Reservation)  ✅ รองรับชื่อ/เบอร์หลายคีย์
     const payItems = Object.entries(payments)
       .filter(([, p]) => p.date === day && isPaymentPaid(p))
       .filter(([, p]) => {
@@ -301,21 +302,41 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
         return pid ? pid === barberId : true;
       })
       .map(([id, p]) => {
-        const pid = p.barber_id || findBarberIdByName(p.barber) || (p.barber || "ไม่ระบุช่าง");
+        const pid =
+          p.barber_id ||
+          findBarberIdByName(p.barber) ||
+          (p.barber || "ไม่ระบุช่าง");
+
+        const customer_name =
+          (p.customerName ??
+           p.customer_name ??
+           "-");
+
+        const phone =
+          (p.phone ??
+           p.customer_phone ??
+           undefined);
+
         const normRes: Reservation = {
           appointment_date: p.date || day,
           appointment_time: p.time || "00:00",
           duration_hours: typeof p.hours === "number" ? p.hours : 1,
           barber_id: pid,
-          customer_name: p.customerName || "-",
-          phone: p.phone,
+          customer_name,
+          phone,
           note: p.note,
           payment_ref: p.payment_ref,
           payment_status: p.payment_status ?? p.status,
           status: p.status,
-          use_point: p.use_point, // ✅ เผื่อกรณีชำระบนเว็บแล้วใช้แต้ม
+          use_point: p.use_point,
         };
-        return { id, res: normRes, source: "web" as const, usedPoint: boolish(p.use_point) };
+
+        return {
+          id,
+          res: normRes,
+          source: "web" as const,
+          usedPoint: boolish(p.use_point),
+        };
       });
 
     return mergeReservations([...resItems, ...payItems]);
@@ -373,7 +394,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
     if (src === "line") return { ...base, background: "#e8f7ee", color: "#0f7a4b", borderColor: "#c8efd9" };
     return { ...base, background: "#fff6e6", color: "#9a5b00", borderColor: "#ffd9a8" };
   };
-  // ✅ ป้าย “ใช้แต้ม”
+  // ป้าย “ใช้แต้ม”
   const pointChip: React.CSSProperties = {
     padding: "2px 8px",
     borderRadius: 999,
@@ -444,7 +465,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
                     padding: "12px 18px",
                     marginBottom: 10,
                     borderRadius: 10,
-                    background: r.usedPoint ? "#fffbeb" : "#f9f9f9", // ✅ พื้นหลังเหลืองอ่อนเมื่อใช้แต้ม
+                    background: r.usedPoint ? "#fffbeb" : "#f9f9f9",
                     border: "1px solid #e0e0e0",
                   }}
                 >
@@ -490,7 +511,6 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
             <p><strong>ระยะเวลา:</strong> {selectedReservation.total_hours} ชั่วโมง</p>
             <p><strong>หมายเหตุ:</strong> {selectedReservation.note || "-"}</p>
 
-            {/* ✅ แสดงส่วนลดเมื่อใช้แต้ม */}
             {selectedReservation.usedPoint && (
               <div
                 style={{
@@ -503,7 +523,7 @@ const CalendarPage: React.FC<Props> = ({ reservations, barbers }) => {
                   fontWeight: 800,
                 }}
               >
-                ⭐ ใช้แต้ม: ลด 50% 
+                ⭐ ใช้แต้ม: ลด 50%
               </div>
             )}
 

@@ -7,17 +7,20 @@ import Image from 'next/image';
 import QRCode from 'qrcode';
 import generatePayload from 'promptpay-qr';
 
-// RTDB (client)
-import { database, ref, onValue, remove } from '@/lib/firebase';
-import { runTransaction, update } from 'firebase/database';
+// ✅ Firebase v9 modular
+import { getDatabase, ref as dbRef, onValue, remove, runTransaction, update } from 'firebase/database';
+import { app } from '@/lib/firebase';
 
+/* ---------------- UI Colors ---------------- */
 const PINK = '#F48FB1';
 const DEEP_PINK = '#AD1457';
 const BG = '#FFF7FB';
 
+/* ---------------- Config ---------------- */
 const UNIT_PER_HOUR = Number(process.env.NEXT_PUBLIC_DEPOSIT_AMOUNT || 100);
+const PROMPTPAY_ID = process.env.NEXT_PUBLIC_PROMPTPAY_ID || ''; // ต้องตั้งใน Vercel
 
-// soft-hold
+// soft-hold path + timing
 const HOLD_PATH = (date: string, barberId: string, time: string) =>
   `slot_holds/${date}/${barberId}/${time}`;
 const HOLD_KEEPALIVE_MS = 10_000;
@@ -37,10 +40,12 @@ type OCRResult = { text: string; amount?: number; hasRef: boolean };
 export default function OcrClient() {
   const params = useSearchParams();
   const router = useRouter();
+
+  /* ---------- state ---------- */
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  // -------- read params --------
+  /* ---------- read params ---------- */
   const expectedParam = useMemo(() => {
     const raw = params.get('expected');
     const n = raw ? Number(raw) : NaN;
@@ -49,6 +54,7 @@ export default function OcrClient() {
 
   const refCode      = params.get('ref')      || 'NAIL-REF-XXXXXX';
   const customerName = params.get('name')     || '';
+  const phone        = params.get('phone')    || '';   // ✅ รับเบอร์จาก query
   const serviceType  = params.get('service')  || '';
   const date         = params.get('date')     || '';   // yyyy-mm-dd
   const time         = params.get('time')     || '';   // HH:mm
@@ -62,7 +68,7 @@ export default function OcrClient() {
     return Number.isFinite(h) && h > 0 ? Math.floor(h) : 1;
   }, [hoursStr]);
 
-  // unique .xx จาก ref
+  // unique .xx (ตัดปัญหายอดซ้ำกัน)
   const fracFromRef = useMemo(() => {
     let v = 0;
     for (const ch of refCode) v = (v * 31 + ch.charCodeAt(0)) % 100;
@@ -87,38 +93,22 @@ export default function OcrClient() {
     return `${sanitize(barber)}_${sanitize(date)}_${sanitize(tSafe)}`;
   }, [barber, date, time]);
 
-  // ---------- PromptPay QR (สร้างฝั่ง client) ----------
-  const promptpayId = process.env.NEXT_PUBLIC_PROMPTPAY_ID || '';
+  /* ---------- PromptPay QR (client) ---------- */
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
 
-  // payload แบบทั่วไป (รองรับแอประหว่างค่ายได้ดีพอ)
-  function buildPromptPayPayload(id: string, amount: number, ref: string) {
-    const amt = amount.toFixed(2);
-    return `promptpay://payment?amount=${encodeURIComponent(amt)}&pa=${encodeURIComponent(id)}&ref=${encodeURIComponent(ref)}`;
-  }
-
   useEffect(() => {
-  (async () => {
-    if (!promptpayId || totalExpected <= 0) {
-      setQrDataUrl(null);
-      return;
-    }
+    (async () => {
+      if (!PROMPTPAY_ID || totalExpected <= 0) {
+        setQrDataUrl(null);
+        return;
+      }
+      const payload = generatePayload(PROMPTPAY_ID, { amount: Number(totalExpected.toFixed(2)) });
+      const url = await QRCode.toDataURL(payload, { width: 512, errorCorrectionLevel: 'M', margin: 2 });
+      setQrDataUrl(url);
+    })().catch(() => setQrDataUrl(null));
+  }, [totalExpected]);
 
-    // ❌ อย่าใส่ { reference: ... } เพราะ type ไม่รองรับ
-    const payload = generatePayload(promptpayId, {
-      amount: Number(totalExpected.toFixed(2)),
-    });
-
-    const url = await QRCode.toDataURL(payload, {
-      width: 512,
-      errorCorrectionLevel: 'M',
-      margin: 2,
-    });
-    setQrDataUrl(url);
-  })().catch(() => setQrDataUrl(null));
-}, [promptpayId, totalExpected]);
-
-  // -------- OCR state --------
+  /* ---------- OCR state ---------- */
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0);
   const [running, setRunning] = useState(false);
@@ -130,7 +120,9 @@ export default function OcrClient() {
   const [showBookedPopup, setShowBookedPopup] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
 
-  // ===== SOFT-HOLD =====
+  /* ---------- SOFT-HOLD (RTDB) ---------- */
+  const db = getDatabase(app);
+
   const [myHoldAcquired, setMyHoldAcquired] = useState(false);
   const keepAliveTimerRef = useRef<number | null>(null);
   const myClientId = useMemo(() => {
@@ -146,51 +138,42 @@ export default function OcrClient() {
 
   const holdRef = useMemo(() => {
     if (!date || !time || !barberId) return null;
-    return ref(database, HOLD_PATH(date, barberId, time));
-  }, [date, time, barberId]);
+    return dbRef(db, HOLD_PATH(date, barberId, time));
+  }, [db, date, time, barberId]);
 
-  // พยายามยึด hold
+  // acquire hold
   useEffect(() => {
     if (!holdRef) return;
-
     let cancelled = false;
 
-    runTransaction(holdRef as any, (current: any) => {
+    runTransaction(holdRef, (current: any) => {
       const now = Date.now();
       const alive = current && Number(current.expires_at_ms) > now;
-      if (alive && current.owner && current.owner !== myClientId) {
-        return current; // มีคนถืออยู่
-      }
+      if (alive && current.owner && current.owner !== myClientId) return current;
       return {
         owner: myClientId,
         refCode,
         created_at_ms: current?.created_at_ms || now,
         expires_at_ms: now + HOLD_TTL_MS,
       };
-    }).then((res: any) => {
+    }).then((res) => {
       if (cancelled || !res?.snapshot) return;
       const v = res.snapshot.val();
-      const now = Date.now();
-      const alive = v && Number(v.expires_at_ms) > now;
-      const mine = alive && v.owner === myClientId;
-      if (!mine) setShowBookedPopup(true);
-      else setMyHoldAcquired(true);
-    });
+      const alive = v && Number(v.expires_at_ms) > Date.now();
+      if (alive && v.owner === myClientId) setMyHoldAcquired(true);
+      else setShowBookedPopup(true);
+    }).catch(() => setShowBookedPopup(true));
 
-    const unsub = onValue(holdRef as any, (snap: any) => {
-      if (!snap) return;
+    const unsub = onValue(holdRef, (snap) => {
       const v = snap.val();
       if (!v) return;
-      const now = Date.now();
-      const alive = Number(v.expires_at_ms) > now;
-      if (alive && v.owner && v.owner !== myClientId) {
-        setShowBookedPopup(true);
-      }
+      const alive = Number(v.expires_at_ms) > Date.now();
+      if (alive && v.owner && v.owner !== myClientId) setShowBookedPopup(true);
     });
 
     return () => {
       cancelled = true;
-      try { typeof unsub === 'function' && unsub(); } catch {}
+      try { unsub(); } catch {}
     };
   }, [holdRef, myClientId, refCode]);
 
@@ -198,19 +181,16 @@ export default function OcrClient() {
   useEffect(() => {
     if (!holdRef || !myHoldAcquired) return;
 
-    function ping() {
+    const ping = () => {
       const now = Date.now();
-      update(holdRef as any, { expires_at_ms: now + HOLD_TTL_MS }).catch(() => {});
-    }
+      update(holdRef, { expires_at_ms: now + HOLD_TTL_MS }).catch(() => {});
+    };
 
     ping();
     const t = window.setInterval(ping, HOLD_KEEPALIVE_MS);
     keepAliveTimerRef.current = t;
 
-    const offUnload = () => {
-      try { if (holdRef) remove(holdRef as any); } catch {}
-    };
-
+    const offUnload = () => { try { remove(holdRef); } catch {} };
     window.addEventListener('beforeunload', offUnload);
     window.addEventListener('pagehide', offUnload);
 
@@ -221,27 +201,26 @@ export default function OcrClient() {
       }
       window.removeEventListener('beforeunload', offUnload);
       window.removeEventListener('pagehide', offUnload);
-      try { if (holdRef) remove(holdRef as any); } catch {}
+      try { remove(holdRef); } catch {}
     };
   }, [holdRef, myHoldAcquired]);
 
-  // ถ้าโดนแย่ง → กลับหน้า booking
+  // lost hold → back
   useEffect(() => {
     if (!showBookedPopup) return;
     const to = setTimeout(() => router.replace('/booking'), 1200);
     return () => clearTimeout(to);
   }, [showBookedPopup, router]);
 
-  // -------- OCR helpers --------
+  /* ---------- OCR helpers ---------- */
   function extractAmount(text: string): number | undefined {
     const cleaned = text.replace(/[,\s]+/g, ' ');
-    const tokens =
-      cleaned.match(/\d+(?:[ .]\d{3})*(?:[.,]\d{2})|\d+[.,]\d{2}/g) || [];
-    if (tokens.length === 0) return undefined;
+    const tokens = cleaned.match(/\d+(?:[ .]\d{3})*(?:[.,]\d{2})|\d+[.,]\d{2}/g) || [];
+    if (!tokens.length) return undefined;
 
     const candidates = tokens
       .map((t) => t.replace(/\s/g, '').replace(/,/g, '.'))
-      .map((t) => Number(t))
+      .map(Number)
       .filter((n) => Number.isFinite(n));
 
     let best = candidates[0];
@@ -316,7 +295,12 @@ export default function OcrClient() {
     setTimeout(() => runOcr(url), 50);
   }
 
-  // -------- ยืนยัน --------
+  /* ---------- Confirm ---------- */
+  const isOk =
+    !!result &&
+    result.amount !== undefined &&
+    satangs(result.amount) === satangs(totalExpected);
+
   async function handleConfirm() {
     if (!isOk || running || !fileUrl) return;
     try {
@@ -325,6 +309,7 @@ export default function OcrClient() {
       const payload = {
         refCode,
         customerName,
+        phone,               // ✅ ส่งเบอร์ไป backend
         serviceType,
         date,
         time,
@@ -353,7 +338,7 @@ export default function OcrClient() {
         throw new Error(j?.error || res.statusText || 'บันทึกข้อมูลไม่สำเร็จ');
       }
 
-      if (holdRef) { try { await remove(holdRef as any); } catch {} }
+      if (holdRef) { try { await remove(holdRef); } catch {} }
       setShowSummary(true);
     } catch (err: any) {
       console.error(err);
@@ -363,23 +348,16 @@ export default function OcrClient() {
     }
   }
 
-  // ยกเลิก
   async function handleCancel() {
     try {
       if (fileUrl) URL.revokeObjectURL(fileUrl);
-      if (holdRef) { try { await remove(holdRef as any); } catch {} }
+      if (holdRef) { try { await remove(holdRef); } catch {} }
     } finally {
       router.push('/booking');
     }
   }
 
-  // ผ่าน OCR?
-  const isOk =
-    !!result &&
-    result.amount !== undefined &&
-    satangs(result.amount) === satangs(totalExpected);
-
-  // countdown mm:ss
+  /* ---------- countdown ---------- */
   const [remainSec, setRemainSec] = useState<number>(0);
   useEffect(() => {
     if (!mounted) return;
@@ -393,9 +371,7 @@ export default function OcrClient() {
     return () => clearInterval(t);
   }, [mounted, minutes]);
 
-  useEffect(() => {
-    return () => { if (fileUrl) URL.revokeObjectURL(fileUrl); };
-  }, [fileUrl]);
+  useEffect(() => () => { if (fileUrl) URL.revokeObjectURL(fileUrl); }, [fileUrl]);
 
   const bookingText = useMemo(() => {
     const dd = date ? new Date(`${date}T00:00:00`) : null;
@@ -403,6 +379,7 @@ export default function OcrClient() {
     return [
       `ยืนยันการจองคิวทำเล็บ`,
       `ชื่อ: ${customerName || '-'}`,
+      `เบอร์: ${phone || '-'}`,                 // ✅ ใส่เบอร์ในสรุป
       `บริการ: ${serviceType || '-'}`,
       `ช่าง: ${barber || '-'}`,
       `วันเวลา: ${time || '-'} ${dStr || ''}`,
@@ -410,7 +387,7 @@ export default function OcrClient() {
       `ยอดชำระ: ${totalExpected.toFixed(2)} บาท`,
       `รหัสอ้างอิง: ${refCode}`,
     ].join('\n');
-  }, [customerName, serviceType, barber, date, time, hoursNum, totalExpected, refCode]);
+  }, [customerName, phone, serviceType, barber, date, time, hoursNum, totalExpected, refCode]);
 
   async function copySummary() {
     try {
@@ -483,6 +460,7 @@ export default function OcrClient() {
     }, 'image/png', 0.95);
   }
 
+  /* ---------- UI ---------- */
   return (
     <div style={{ minHeight: '100dvh', background: BG, display: 'grid', placeItems: 'center', padding: 16 }}>
       <div style={{ width: '100%', maxWidth: 860, display: 'grid', gap: 16 }}>
@@ -501,14 +479,10 @@ export default function OcrClient() {
         <Card title="สแกนเพื่อชำระ (PromptPay)">
           <div style={{ display: 'grid', justifyItems: 'center', gap: 12 }}>
             {qrDataUrl ? (
-              <img
-                src={qrDataUrl}
-                alt="PromptPay QR"
-                style={{ width: 260, height: 260, borderRadius: 16, objectFit: 'contain', border: `1px solid ${PINK}` }}
-              />
+              <img src={qrDataUrl} alt="PromptPay QR" style={{ width: 260, height: 260, borderRadius: 16, objectFit: 'contain', border: `1px solid ${PINK}` }} />
             ) : (
               <div style={{ width: 260, height: 260, borderRadius: 16, border: `1px solid ${PINK}`, display: 'grid', placeItems: 'center', color: '#999' }}>
-                กำลังสร้าง QR…
+                {PROMPTPAY_ID ? 'กำลังสร้าง QR…' : 'กรุณาตั้งค่า NEXT_PUBLIC_PROMPTPAY_ID'}
               </div>
             )}
             <div style={{ textAlign: 'center', color: '#666' }}>
@@ -521,6 +495,7 @@ export default function OcrClient() {
         <Card title="ข้อมูลการจอง">
           <div style={{ display: 'grid', gap: 6 }}>
             {customerName && <div><b>ชื่อ: </b>{customerName}</div>}
+            {phone &&       <div><b>เบอร์: </b>{phone}</div>} {/* ✅ แสดงเบอร์ */}
             {serviceType  && <div><b>บริการ: </b>{serviceType}</div>}
             {(barber || barberId) && <div><b>ช่าง: </b>{barber || barberId}</div>}
             {(date || time) && <div><b>เวลา: </b>{time} {date}</div>}
@@ -630,7 +605,7 @@ export default function OcrClient() {
         </div>
       )}
 
-      {/* ⚠️ Popup: คิวถูกปิดไปแล้ว */}
+      {/* ⚠️ ถูกแย่งคิว */}
       {showBookedPopup && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.25)', zIndex: 60, display: 'grid', placeItems: 'center' }}>
           <div style={{ width: 340, background: '#fff', borderRadius: 18, padding: 22, display: 'grid', gap: 12, justifyItems: 'center', boxShadow: '0 20px 60px rgba(173,20,87,.25)' }}>
@@ -650,12 +625,13 @@ export default function OcrClient() {
         </div>
       )}
 
-      {/* ✅ ป็อปอัป “สรุปการจอง” */}
+      {/* ✅ Summary */}
       {showSummary && (
         <SummaryModal
           text={[
             `ยืนยันการจองคิวทำเล็บ`,
             `ชื่อ: ${customerName || '-'}`,
+            `เบอร์: ${phone || '-'}`, // ✅ แสดงเบอร์ในสรุป
             `บริการ: ${serviceType || '-'}`,
             `ช่าง: ${barber || '-'}`,
             `วันเวลา: ${time || '-'} ${date || ''}`,
@@ -673,6 +649,7 @@ export default function OcrClient() {
   );
 }
 
+/* ---------------- Summary Modal ---------------- */
 function SummaryModal({
   text, refCode, onCopy, onDownload, onClose,
 }: { text: string; refCode: string; onCopy: () => void; onDownload: () => void; onClose: () => void }) {
